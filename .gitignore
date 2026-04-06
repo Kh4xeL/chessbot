@@ -1,0 +1,29 @@
+# IDEs
+.idea/
+.vscode/
+
+# Build Folders (The most important ones to ignore!)
+build/
+cmake-build-*/
+bin/
+obj/
+test/
+
+# Python bits
+__pycache__/
+*.pyc
+
+# Huge Dependencies
+libtorch/
+
+# Executables
+engine
+*.exe
+
+# Apple
+.DS_Store
+
+# Private
+assets/main.py
+assets/converter.py
+assets/alphazero_chess_bot.pth
