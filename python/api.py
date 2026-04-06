@@ -36,7 +36,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
 HTML_PATH = os.path.join(PROJECT_ROOT, "web", "index.html")
 BOOK_PATH = os.path.join(PROJECT_ROOT, "assets", "book.bin")
-ENGINE_PATH = os.path.join(PROJECT_ROOT, "cmake-build-release", "engine")
+ENGINE_PATH = os.path.join(PROJECT_ROOT, "build", "engine")
 
 @app.get("/")
 def serve_ui():
