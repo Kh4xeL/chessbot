@@ -4,6 +4,17 @@ This script serves the web UI and acts as a middleman between the frontend and t
 It handles opening book lookups, formats engine data, and generates human-readable tactical annotations.
 """
 
+import os
+
+# Add LibTorch shared libraries to runtime path
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
+LIBTORCH_LIB = os.path.join(PROJECT_ROOT, "libtorch", "lib")
+
+# Prepend to LD_LIBRARY_PATH so the engine subprocess can find .so files
+os.environ["LD_LIBRARY_PATH"] = LIBTORCH_LIB + ":" + os.environ.get("LD_LIBRARY_PATH", "")
+
+
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
@@ -11,7 +22,6 @@ from fastapi.responses import FileResponse
 import subprocess
 import chess
 import chess.polyglot
-import os
 import time
 
 app = FastAPI(title="Hybrid AlphaZero Engine API")
@@ -184,9 +194,9 @@ def calculate_move(request: MoveRequest):
             }
 
         raise HTTPException(status_code=500, detail="Engine failed to return a move format.")
-
+    
     except subprocess.CalledProcessError as e:
-        raise HTTPException(status_code=500, detail=f"C++ Engine crashed: {e.stderr}")
+        raise HTTPException(status_code=500, detail=f"C++ Engine crashed.\nSTDERR: {e.stderr}\nSTDOUT: {e.stdout}\nEngine path: {ENGINE_PATH}\nExists: {os.path.exists(ENGINE_PATH)}")
 
 
 class ThreatRequest(BaseModel):
