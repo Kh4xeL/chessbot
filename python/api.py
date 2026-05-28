@@ -300,7 +300,7 @@ def check_threats(request: ThreatRequest):
         return {"threat": "Could not analyze threats.", "hint": None, "is_threat": False}
 
 
-from semantic_analysis import analyze_pgn as _analyze_pgn
+from .semantic_analysis import analyze_pgn as _analyze_pgn
 from pydantic import BaseModel
 
 class AnalyzeRequest(BaseModel):
