@@ -38,6 +38,71 @@ HTML_PATH = os.path.join(PROJECT_ROOT, "web", "index.html")
 BOOK_PATH = os.path.join(PROJECT_ROOT, "assets", "book.bin")
 ENGINE_PATH = os.path.join(PROJECT_ROOT, "build", "engine")
 
+PIECE_NAMES = {1: "Pawn", 2: "Knight", 3: "Bishop", 4: "Rook", 5: "Queen", 6: "King"}
+
+
+def annotate_tutor_moves(board: chess.Board, tutor_moves: list) -> None:
+    """Mutates each entry in `tutor_moves` to add a `tactics` field with
+    emoji tags describing what the move does on `board` (capture quality,
+    check/mate, fork). Used to render UI hints for both the bot's top moves
+    and the user's top replies. The board is treated as read-only (we push
+    + pop within each entry)."""
+    for tutor in tutor_moves:
+        try:
+            m = chess.Move.from_uci(tutor["move"])
+            tags = []
+
+            # Motif A: Capture & Trade Detection
+            if board.is_capture(m):
+                victim = board.piece_at(m.to_square)
+                attacker = board.piece_at(m.from_square)
+
+                if victim and attacker:
+                    board.push(m)
+                    is_recaptured = board.is_attacked_by(board.turn, m.to_square)
+                    board.pop()
+
+                    v_type = victim.piece_type
+                    a_type = attacker.piece_type
+                    v_name = PIECE_NAMES.get(v_type, "piece")
+                    a_name = PIECE_NAMES.get(a_type, "piece")
+
+                    if is_recaptured:
+                        if v_type == a_type:
+                            tags.append(f"🔄 Trades {v_name}s")
+                        elif v_type < a_type:
+                            tags.append(f"⚠️ Sacrifices {a_name} for {v_name}")
+                        else:
+                            tags.append(f"💥 Wins {v_name} for {a_name}")
+                    else:
+                        tags.append(f"💥 Captures {v_name}")
+                elif board.is_en_passant(m):
+                    tags.append("💥 En Passant Capture")
+
+            # Motif B: Check / Mate
+            board.push(m)
+            if board.is_checkmate():
+                tags.append("🏆 Checkmate!")
+            elif board.is_check():
+                tags.append("🎯 Delivers Check")
+
+            # Motif C: Fork / Double Attack
+            attacked_squares = board.attacks(m.to_square)
+            valuable_targets = 0
+            for sq in attacked_squares:
+                target_piece = board.piece_at(sq)
+                if target_piece and target_piece.color == board.turn and target_piece.piece_type > 1:
+                    valuable_targets += 1
+            if valuable_targets >= 2:
+                tags.append("🔱 Creates a Fork/Double Attack!")
+
+            board.pop()
+
+            tutor["tactics"] = " | ".join(tags) if tags else "🛡️ Solid positional move"
+        except ValueError:
+            tutor["tactics"] = "Positional move"
+
+
 @app.get("/")
 def serve_ui():
     """Serves the frontend interactive chessboard UI."""
@@ -85,14 +150,25 @@ def calculate_move(request: MoveRequest):
         calculation_time = round(end_time - start_time, 2)
 
         best_move = None
+        depth_reached = 0
         top_moves = []
+        user_top_moves = []
 
         # 3. Parse the C++ stdout stream
-        # The engine returns a specific format: BEST_MOVE:e2e4 and RANK:1|MOVE:e2e4|IDEA:e2e4 c7c5...
+        # The engine returns: BEST_MOVE:e2e4, DEPTH_REACHED:N (last fully
+        # completed iterative-deepening iteration), RANK:1|MOVE:e2e4|IDEA:...,
+        # and USER_RANK:1|MOVE:c7c5|IDEA:... (top user replies on the position
+        # AFTER the bot plays best_move; pre-computed in the same engine call
+        # using a TT-warm supplementary search).
         for line in result.stdout.split('\n'):
             line = line.strip()
             if line.startswith("BEST_MOVE:"):
                 best_move = line.split(":")[1].strip()
+            elif line.startswith("DEPTH_REACHED:"):
+                try:
+                    depth_reached = int(line.split(":")[1].strip())
+                except ValueError:
+                    depth_reached = 0
             elif line.startswith("RANK:"):
                 parts = line.split("|")
                 if len(parts) == 3:
@@ -105,82 +181,47 @@ def calculate_move(request: MoveRequest):
                         "move": move,
                         "idea": idea
                     })
+            elif line.startswith("USER_RANK:"):
+                parts = line.split("|")
+                if len(parts) == 3:
+                    rank = parts[0].split(":")[1]
+                    move = parts[1].split(":")[1]
+                    idea = parts[2].split(":")[1]
+                    user_top_moves.append({
+                        "rank": int(rank),
+                        "move": move,
+                        "idea": idea
+                    })
 
         # --- 4. TACTICAL MOTIF ANNOTATOR (Python Logic Layer) ---
-        # Instead of calculating forks/skewers in C++, Python analyzes the moves
-        # returned by C++ to generate human-readable explanations for the UI.
-        piece_names = {1: "Pawn", 2: "Knight", 3: "Bishop", 4: "Rook", 5: "Queen", 6: "King"}
+        # Annotates each tutor entry with emoji tags (capture/check/fork/etc.)
+        # for the position it is being suggested from. Used for both the bot's
+        # top_3 (annotated against the request FEN) and the user's top_3 replies
+        # (annotated against the position AFTER the bot plays best_move).
+        annotate_tutor_moves(board, top_moves)
 
-        for tutor in top_moves:
+        # Build the post-bot-move position and annotate the user's top replies
+        # against it. The supplementary search ran on this exact position, so
+        # the moves listed here are legal in it.
+        user_top_3 = []
+        if best_move and user_top_moves:
             try:
-                m = chess.Move.from_uci(tutor["move"])
-                tags = []
-
-                # Motif A: Capture & Trade Detection
-                if board.is_capture(m):
-                    victim = board.piece_at(m.to_square)
-                    attacker = board.piece_at(m.from_square)
-
-                    if victim and attacker:
-                        # Simulate the move to see if the opponent can recapture immediately
-                        board.push(m)
-                        is_recaptured = board.is_attacked_by(board.turn, m.to_square) # Board turn is now opponent's
-                        board.pop()
-
-                        v_type = victim.piece_type
-                        a_type = attacker.piece_type
-                        v_name = piece_names.get(v_type, "piece")
-                        a_name = piece_names.get(a_type, "piece")
-
-                        if is_recaptured:
-                            if v_type == a_type:
-                                tags.append(f"🔄 Trades {v_name}s")
-                            elif v_type < a_type:
-                                tags.append(f"⚠️ Sacrifices {a_name} for {v_name}")
-                            else:
-                                tags.append(f"💥 Wins {v_name} for {a_name}")
-                        else:
-                            tags.append(f"💥 Captures {v_name}")
-                    elif board.is_en_passant(m):
-                        tags.append("💥 En Passant Capture")
-
-                # Motif B: Check Detection
-                board.push(m) # Temporarily apply the move
-                if board.is_checkmate():
-                    tags.append("🏆 Checkmate!")
-                elif board.is_check():
-                    tags.append("🎯 Delivers Check")
-
-                # Motif C: Fork / Double Attack Detection (Basic Heuristic)
-                # Count how many valuable pieces the moved piece is currently attacking
-                attacked_squares = board.attacks(m.to_square)
-                valuable_targets = 0
-                for sq in attacked_squares:
-                    target_piece = board.piece_at(sq)
-                    if target_piece and target_piece.color == board.turn and target_piece.piece_type > 1:
-                        valuable_targets += 1
-
-                if valuable_targets >= 2:
-                    tags.append("🔱 Creates a Fork/Double Attack!")
-
-                board.pop() # Revert simulation
-
-                # Save the human-readable tags back to the dictionary
-                if tags:
-                    tutor["tactics"] = " | ".join(tags)
-                else:
-                    tutor["tactics"] = "🛡️ Solid positional move"
-
-            except ValueError:
-                tutor["tactics"] = "Positional move"
+                user_board = board.copy()
+                user_board.push(chess.Move.from_uci(best_move))
+                annotate_tutor_moves(user_board, user_top_moves)
+                user_top_3 = user_top_moves
+            except (ValueError, AssertionError):
+                user_top_3 = []
 
         if best_move:
             return {
                 "move": best_move,
                 "engine": "Hybrid AlphaZero C++",
                 "depth": request.depth,
+                "depth_reached": depth_reached,
                 "time": calculation_time,
-                "top_3": top_moves
+                "top_3": top_moves,
+                "user_top_3": user_top_3,
             }
 
         raise HTTPException(status_code=500, detail="Engine failed to return a move format.")
