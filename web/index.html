@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <title>AI Chess Tutor</title>
@@ -10,36 +11,140 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/chess.js/0.10.3/chess.min.js"></script>
 
     <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background-color: #1e1e1e; color: #ffffff; display: flex; flex-direction: column; align-items: center; margin-top: 30px; }
-        #myBoard { width: 500px; margin-bottom: 20px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background-color: #1e1e1e;
+            color: #ffffff;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            margin-top: 30px;
+        }
+
+        #myBoard {
+            width: 500px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.5);
+        }
 
         /* Updated Controls Panel */
-        .controls { background-color: #2d2d2d; padding: 15px; border-radius: 8px; margin-bottom: 20px; display: flex; gap: 20px; flex-wrap: wrap; justify-content: center; width: 470px;}
-        .controls select, .controls input[type="number"] { padding: 5px; border-radius: 4px; border: 1px solid #555; background: #333; color: white; }
-        .controls label { display: flex; align-items: center; gap: 8px; font-size: 14px; font-weight: bold;}
-        .controls input[type="range"] { cursor: pointer; }
+        .controls {
+            background-color: #2d2d2d;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            display: flex;
+            gap: 20px;
+            flex-wrap: wrap;
+            justify-content: center;
+            width: 470px;
+        }
 
-        .status-box { background-color: #2d2d2d; padding: 15px 30px; border-radius: 8px; text-align: center; width: 440px; }
-        .spinner { display: none; margin-top: 10px; font-style: italic; color: #4CAF50; }
-        .resp { display: none; margin-top: 10px; font-style: italic; color: #3665cd; font-weight: bold;}
+        .controls select,
+        .controls input[type="number"] {
+            padding: 5px;
+            border-radius: 4px;
+            border: 1px solid #555;
+            background: #333;
+            color: white;
+        }
+
+        .controls label {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 14px;
+            font-weight: bold;
+        }
+
+        .controls input[type="range"] {
+            cursor: pointer;
+        }
+
+        .status-box {
+            background-color: #2d2d2d;
+            padding: 15px 30px;
+            border-radius: 8px;
+            text-align: center;
+            width: 440px;
+        }
+
+        .spinner {
+            display: none;
+            margin-top: 10px;
+            font-style: italic;
+            color: #4CAF50;
+        }
+
+        .resp {
+            display: none;
+            margin-top: 10px;
+            font-style: italic;
+            color: #3665cd;
+            font-weight: bold;
+        }
 
         /* Tutor Panel Styles */
-        #tutorPanel { display: none; margin-top: 15px; text-align: left; background-color: #222; padding: 10px; border-radius: 6px; border-left: 4px solid #4CAF50; transition: all 0.3s;}
-        .threat-alert { border-left: 4px solid #f44336 !important; background-color: #331a1a !important; }
+        #tutorPanel {
+            display: none;
+            margin-top: 15px;
+            text-align: left;
+            background-color: #222;
+            padding: 10px;
+            border-radius: 6px;
+            border-left: 4px solid #4CAF50;
+            transition: all 0.3s;
+        }
 
-        .tutor-line { margin: 5px 0; font-size: 14px; color: #ccc; }
-        .tutor-move { color: #fff; font-weight: bold; background: #444; padding: 2px 6px; border-radius: 4px; margin-right: 5px; }
+        .threat-alert {
+            border-left: 4px solid #f44336 !important;
+            background-color: #331a1a !important;
+        }
+
+        .tutor-line {
+            margin: 5px 0;
+            font-size: 14px;
+            color: #ccc;
+        }
+
+        .tutor-move {
+            color: #fff;
+            font-weight: bold;
+            background: #444;
+            padding: 2px 6px;
+            border-radius: 4px;
+            margin-right: 5px;
+        }
 
         /* Highlighting CSS */
-        .highlight-move { background-color: rgba(255, 255, 51, 0.5) !important; }
-        .highlight-blunder { box-shadow: inset 0 0 5px 4px rgba(231, 76, 60, 0.9) !important; }
-        .highlight-mistake { box-shadow: inset 0 0 5px 4px rgba(230, 126, 34, 0.9) !important; }
-        .highlight-inaccuracy { box-shadow: inset 0 0 5px 4px rgba(241, 196, 15, 0.9) !important; }
+        .highlight-move {
+            background-color: rgba(255, 255, 51, 0.5) !important;
+        }
+
+        .highlight-blunder {
+            box-shadow: inset 0 0 5px 4px rgba(231, 76, 60, 0.9) !important;
+        }
+
+        .highlight-mistake {
+            box-shadow: inset 0 0 5px 4px rgba(230, 126, 34, 0.9) !important;
+        }
+
+        .highlight-inaccuracy {
+            box-shadow: inset 0 0 5px 4px rgba(241, 196, 15, 0.9) !important;
+        }
 
         /* Make the cards look clickable */
         /* Make the cards look clickable and add active states */
-        .analysis-card { transition: transform 0.1s, background-color 0.2s; cursor: pointer; opacity: 0.6; }
-        .analysis-card:hover { opacity: 0.9; }
+        .analysis-card {
+            transition: transform 0.1s, background-color 0.2s;
+            cursor: pointer;
+            opacity: 0.6;
+        }
+
+        .analysis-card:hover {
+            opacity: 0.9;
+        }
+
         .active-card {
             opacity: 1 !important;
             background-color: #383838 !important;
@@ -48,142 +153,158 @@
         }
     </style>
 </head>
+
 <body>
 
-<h2>Hybrid AI Chess Tutor</h2>
+    <h2>Hybrid AI Chess Tutor</h2>
 
-<div style="display: flex; gap: 30px; align-items: flex-start; justify-content: center; width: 100%; max-width: 1100px;">
+    <div
+        style="display: flex; gap: 30px; align-items: flex-start; justify-content: center; width: 100%; max-width: 1100px;">
 
-    <div id="gameColumn">
-        <div class="controls">
-            <label>Engine Depth: <input type="number" id="depthInput" value="5" min="1" max="12" style="width: 50px;"></label>
-            <label>AI Elo:
-                <input type="range" id="eloInput" min="800" max="3000" value="2500" step="100" oninput="document.getElementById('eloDisplay').innerText = this.value">
-                <span id="eloDisplay" style="color: #4CAF50;">2500</span>
-            </label>
-            <label>Tutor Assistance:
-                <select id="assistLevel">
-                    <option value="0">Level 0: No Help</option>
-                    <option value="1">Level 1: Medium (Threat Warnings)</option>
-                    <option value="2">Level 2: Maximum (Top 3 & Ideas)</option>
-                </select>
-            </label>
+        <div id="gameColumn">
+            <div class="controls">
+                <label>Engine Depth: <input type="number" id="depthInput" value="5" min="1" max="12"
+                        style="width: 50px;"></label>
+                <label>AI Elo:
+                    <input type="range" id="eloInput" min="800" max="3000" value="2500" step="100"
+                        oninput="document.getElementById('eloDisplay').innerText = this.value">
+                    <span id="eloDisplay" style="color: #4CAF50;">2500</span>
+                </label>
+                <label>Tutor Assistance:
+                    <select id="assistLevel">
+                        <option value="0">Level 0: No Help</option>
+                        <option value="1">Level 1: Medium (Threat Warnings)</option>
+                        <option value="2">Level 2: Maximum (Top 3 & Ideas)</option>
+                    </select>
+                </label>
+            </div>
+
+            <div id="myBoard"></div>
+
+            <div class="status-box">
+                <div id="status">White to move</div>
+                <div id="thinking" class="spinner">Engine is calculating...</div>
+                <div id="move" class="resp">move</div>
+                <div id="tutorPanel"></div>
+
+                <button id="analyzeBtn"
+                    style="display: none; width: 100%; margin-top: 15px; padding: 12px 24px; background-color: #3665cd; color: white; font-weight: bold; border: none; border-radius: 5px; cursor: pointer; font-size: 16px; transition: 0.2s;">
+                    🔍 Analyze Game
+                </button>
+            </div>
         </div>
 
-        <div id="myBoard"></div>
-
-        <div class="status-box">
-            <div id="status">White to move</div>
-            <div id="thinking" class="spinner">Engine is calculating...</div>
-            <div id="move" class="resp">move</div>
-            <div id="tutorPanel"></div>
-
-            <button id="analyzeBtn" style="display: none; width: 100%; margin-top: 15px; padding: 12px 24px; background-color: #3665cd; color: white; font-weight: bold; border: none; border-radius: 5px; cursor: pointer; font-size: 16px; transition: 0.2s;">
-                🔍 Analyze Game
+        <div id="analysisView"
+            style="display: none; background-color: #2d2d2d; padding: 20px; border-radius: 8px; width: 450px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); text-align: left;">
+            <h3 style="margin-top: 0; color: #4CAF50; border-bottom: 1px solid #444; padding-bottom: 10px;">Post-Game
+                Analysis</h3>
+            <div id="analysisSummary"
+                style="margin-bottom: 20px; font-size: 14px; background: #222; padding: 15px; border-radius: 6px;">
+            </div>
+            <div id="analysisDetails"
+                style="max-height: 65vh; overflow-y: auto; padding-right: 10px; scroll-behavior: smooth;"></div>
+            <button onclick="location.reload()"
+                style="margin-top: 20px; padding: 10px; background: #444; color: white; font-weight: bold; border: none; border-radius: 4px; cursor: pointer; width: 100%;">
+                Play Again
             </button>
         </div>
+
     </div>
 
-    <div id="analysisView" style="display: none; background-color: #2d2d2d; padding: 20px; border-radius: 8px; width: 450px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); text-align: left;">
-        <h3 style="margin-top: 0; color: #4CAF50; border-bottom: 1px solid #444; padding-bottom: 10px;">Post-Game Analysis</h3>
-        <div id="analysisSummary" style="margin-bottom: 20px; font-size: 14px; background: #222; padding: 15px; border-radius: 6px;"></div>
-        <div id="analysisDetails" style="max-height: 65vh; overflow-y: auto; padding-right: 10px; scroll-behavior: smooth;"></div>
-        <button onclick="location.reload()" style="margin-top: 20px; padding: 10px; background: #444; color: white; font-weight: bold; border: none; border-radius: 4px; cursor: pointer; width: 100%;">
+    <button id="analyzeBtn"
+        style="display: none; margin-top: 15px; padding: 12px 24px; background-color: #3665cd; color: white; font-weight: bold; border: none; border-radius: 5px; cursor: pointer; font-size: 16px; transition: 0.2s;">
+        🔍 Analyze Game
+    </button>
+
+    <div id="analysisView"
+        style="display: none; background-color: #2d2d2d; padding: 20px; border-radius: 8px; width: 560px; margin-top: 20px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); text-align: left;">
+        <h3 style="margin-top: 0; color: #4CAF50; border-bottom: 1px solid #444; padding-bottom: 10px;">Post-Game
+            Analysis</h3>
+
+        <div id="analysisSummary"
+            style="margin-bottom: 20px; font-size: 14px; background: #222; padding: 15px; border-radius: 6px;"></div>
+
+        <div id="analysisDetails" style="max-height: 400px; overflow-y: auto; padding-right: 10px;"></div>
+
+        <button onclick="location.reload()"
+            style="margin-top: 20px; padding: 10px; background: #444; color: white; font-weight: bold; border: none; border-radius: 4px; cursor: pointer; width: 100%;">
             Play Again
         </button>
     </div>
 
-</div>
+    <script>
+        var board = null;
+        var game = new Chess();
+        var $status = $('#status');
+        var $thinking = $('#thinking');
+        var $move = $('#move');
+        var $tutorPanel = $('#tutorPanel');
 
-<button id="analyzeBtn" style="display: none; margin-top: 15px; padding: 12px 24px; background-color: #3665cd; color: white; font-weight: bold; border: none; border-radius: 5px; cursor: pointer; font-size: 16px; transition: 0.2s;">
-    🔍 Analyze Game
-</button>
-
-<div id="analysisView" style="display: none; background-color: #2d2d2d; padding: 20px; border-radius: 8px; width: 560px; margin-top: 20px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); text-align: left;">
-    <h3 style="margin-top: 0; color: #4CAF50; border-bottom: 1px solid #444; padding-bottom: 10px;">Post-Game Analysis</h3>
-
-    <div id="analysisSummary" style="margin-bottom: 20px; font-size: 14px; background: #222; padding: 15px; border-radius: 6px;"></div>
-
-    <div id="analysisDetails" style="max-height: 400px; overflow-y: auto; padding-right: 10px;"></div>
-
-    <button onclick="location.reload()" style="margin-top: 20px; padding: 10px; background: #444; color: white; font-weight: bold; border: none; border-radius: 4px; cursor: pointer; width: 100%;">
-        Play Again
-    </button>
-</div>
-
-<script>
-    var board = null;
-    var game = new Chess();
-    var $status = $('#status');
-    var $thinking = $('#thinking');
-    var $move = $('#move');
-    var $tutorPanel = $('#tutorPanel');
-
-    function onDragStart (source, piece, position, orientation) {
-        if (game.game_over()) return false;
-        if (piece.search(/^b/) !== -1) return false;
-    }
-
-    function onDrop (source, target) {
-        var move = game.move({ from: source, to: target, promotion: 'q' });
-        if (move === null) return 'snapback';
-
-        updateStatus();
-        $tutorPanel.hide(); // Hide tutor while bot thinks
-
-        window.setTimeout(makeEngineMove, 250);
-    }
-
-    function onSnapEnd () { board.position(game.fen()); }
-
-    function updateStatus () {
-        var statusHTML = '';
-        var moveColor = (game.turn() === 'w') ? 'White' : 'Black';
-
-        if (game.in_checkmate()) {
-            statusHTML = 'Game over, ' + moveColor + ' is in checkmate.';
-            $('#analyzeBtn').show(); // Show the Analyze button!
+        function onDragStart(source, piece, position, orientation) {
+            if (game.game_over()) return false;
+            if (piece.search(/^b/) !== -1) return false;
         }
-        else if (game.in_draw()) {
-            statusHTML = 'Game over, drawn position';
-            $('#analyzeBtn').show(); // Show the Analyze button!
+
+        function onDrop(source, target) {
+            var move = game.move({ from: source, to: target, promotion: 'q' });
+            if (move === null) return 'snapback';
+
+            updateStatus();
+            $tutorPanel.hide(); // Hide tutor while bot thinks
+
+            window.setTimeout(makeEngineMove, 250);
         }
-        else {
-            statusHTML = moveColor + ' to move';
-            if (game.in_check()) statusHTML += ', ' + moveColor + ' is in check';
+
+        function onSnapEnd() { board.position(game.fen()); }
+
+        function updateStatus() {
+            var statusHTML = '';
+            var moveColor = (game.turn() === 'w') ? 'White' : 'Black';
+
+            if (game.in_checkmate()) {
+                statusHTML = 'Game over, ' + moveColor + ' is in checkmate.';
+                $('#analyzeBtn').show(); // Show the Analyze button!
+            }
+            else if (game.in_draw()) {
+                statusHTML = 'Game over, drawn position';
+                $('#analyzeBtn').show(); // Show the Analyze button!
+            }
+            else {
+                statusHTML = moveColor + ' to move';
+                if (game.in_check()) statusHTML += ', ' + moveColor + ' is in check';
+            }
+            $status.html(statusHTML);
         }
-        $status.html(statusHTML);
-    }
 
-    // --- LEVEL 1: THREAT DETECTION ---
-    function getThreatDetection() {
-        if (game.game_over() || game.turn() !== 'w') return;
+        // --- LEVEL 1: THREAT DETECTION ---
+        function getThreatDetection() {
+            if (game.game_over() || game.turn() !== 'w') return;
 
-        var currentElo = parseInt(document.getElementById('eloInput').value) || 2500;
+            var currentElo = parseInt(document.getElementById('eloInput').value) || 2500;
 
-        $tutorPanel.removeClass('threat-alert').html('<span style="color:#888;">Scanning for immediate threats...</span>').show();
+            $tutorPanel.removeClass('threat-alert').html('<span style="color:#888;">Scanning for immediate threats...</span>').show();
 
-        fetch('/get_threats', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ fen: game.fen(), elo: currentElo }) // Uses UI Elo
-        })
-            .then(res => res.json())
-            .then(data => {
-                if (game.turn() !== 'w') return; // Ignore if user moved
+            fetch('/get_threats', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ fen: game.fen(), elo: currentElo }) // Uses UI Elo
+            })
+                .then(res => res.json())
+                .then(data => {
+                    if (game.turn() !== 'w') return; // Ignore if user moved
 
-                $tutorPanel.empty();
+                    $tutorPanel.empty();
 
-                if (data.is_threat) {
-                    $tutorPanel.addClass('threat-alert');
-                    $tutorPanel.append(`<strong>🚨 Tactical Alert:</strong><br><span style="color:#ffcccc;">${data.threat}</span>`);
-                } else {
-                    $tutorPanel.removeClass('threat-alert');
-                    $tutorPanel.append(`<strong>🛡️ Coast is clear:</strong><br><span style="color:#ccc;">${data.threat}</span>`);
-                }
+                    if (data.is_threat) {
+                        $tutorPanel.addClass('threat-alert');
+                        $tutorPanel.append(`<strong>🚨 Tactical Alert:</strong><br><span style="color:#ffcccc;">${data.threat}</span>`);
+                    } else {
+                        $tutorPanel.removeClass('threat-alert');
+                        $tutorPanel.append(`<strong>🛡️ Coast is clear:</strong><br><span style="color:#ccc;">${data.threat}</span>`);
+                    }
 
-                if (data.hint) {
-                    $tutorPanel.append(`
+                    if (data.hint) {
+                        $tutorPanel.append(`
                         <details style="margin-top: 12px; cursor: pointer; background: #333; padding: 8px; border-radius: 4px; border: 1px solid #555;">
                             <summary style="font-weight: bold; color: #4CAF50; outline: none;">💡 Need a hint?</summary>
                             <div style="margin-top: 8px; color: #fff; font-size: 15px;">
@@ -191,145 +312,167 @@
                             </div>
                         </details>
                     `);
-                }
+                    }
+                })
+                .catch(err => console.error("Threat fetch error:", err));
+        }
+
+        // --- LEVEL 2: MAXIMUM ASSISTANCE ---
+        function getTutorHints() {
+            if (game.game_over() || game.turn() !== 'w') return;
+
+            console.log("--- REQUESTING LEVEL 2 (PV & TACTICS) ---");
+            $tutorPanel.removeClass('threat-alert').html('<span style="color:#888;">Tutor is analyzing your best options...</span>').show();
+
+            var currentDepth = parseInt(document.getElementById('depthInput').value) || 5;
+            var currentElo = parseInt(document.getElementById('eloInput').value) || 2500;
+
+            fetch('/get_move', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    fen: game.fen(),
+                    elo: currentElo, // Uses UI Elo
+                    depth: 5,
+                    time_limit: 3000
+                })
             })
-            .catch(err => console.error("Threat fetch error:", err));
-    }
+                .then(response => response.json())
+                .then(data => {
+                    if (game.turn() !== 'w') return;
 
-    // --- LEVEL 2: MAXIMUM ASSISTANCE ---
-    function getTutorHints() {
-        if (game.game_over() || game.turn() !== 'w') return;
+                    console.log("Level 2 API Response:", data);
+                    $tutorPanel.empty();
+                    $tutorPanel.append('<strong>Tutor Ideas (Your best moves):</strong><br>');
 
-        console.log("--- REQUESTING LEVEL 2 (PV & TACTICS) ---");
-        $tutorPanel.removeClass('threat-alert').html('<span style="color:#888;">Tutor is analyzing your best options...</span>').show();
-
-        var currentDepth = parseInt(document.getElementById('depthInput').value) || 5;
-        var currentElo = parseInt(document.getElementById('eloInput').value) || 2500;
-
-        fetch('/get_move', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                fen: game.fen(),
-                elo: currentElo, // Uses UI Elo
-                depth: 5,
-                time_limit: 3000
-            })
-        })
-            .then(response => response.json())
-            .then(data => {
-                if (game.turn() !== 'w') return;
-
-                console.log("Level 2 API Response:", data);
-                $tutorPanel.empty();
-                $tutorPanel.append('<strong>Tutor Ideas (Your best moves):</strong><br>');
-
-                if (data.top_3 && data.top_3.length > 0) {
-                    data.top_3.forEach(tutor => {
-                        $tutorPanel.append(`
+                    if (data.top_3 && data.top_3.length > 0) {
+                        data.top_3.forEach(tutor => {
+                            $tutorPanel.append(`
                             <div class="tutor-line" style="margin-bottom: 8px;">
                                 <span class="tutor-move">${tutor.move}</span>
                                 <span style="color: #4CAF50; font-weight: bold;">${tutor.tactics || "Solid Move"}</span><br>
                                 <span style="font-size: 12px; color: #aaa;">Predicted line: ${tutor.idea || "None"}</span>
                             </div>
                         `);
-                    });
-                } else {
-                    $tutorPanel.append(`<div class="tutor-line"><span class="tutor-move">${data.move}</span> Idea: Standard Opening Book Move</div>`);
-                }
+                        });
+                    } else {
+                        $tutorPanel.append(`<div class="tutor-line"><span class="tutor-move">${data.move}</span> Idea: Standard Opening Book Move</div>`);
+                    }
+                })
+                .catch(err => console.error("Tutor fetch error:", err));
+        }
+
+        // --- TRIGGER ASSISTANCE BASED ON UI SELECTION ---
+        function triggerAssistance() {
+            var assistLevel = parseInt(document.getElementById('assistLevel').value);
+            if (assistLevel === 1) getThreatDetection();
+            else if (assistLevel === 2) getTutorHints();
+            else $tutorPanel.hide();
+        }
+
+        $('#assistLevel').on('change', triggerAssistance);
+
+        // --- THE BOT'S TURN ---
+        function makeEngineMove() {
+            if (game.game_over()) return;
+
+            $move.hide();
+            $thinking.show();
+
+            var customDepth = parseInt(document.getElementById('depthInput').value) || 5;
+            var currentElo = parseInt(document.getElementById('eloInput').value) || 2500;
+
+            console.log("--- REQUESTING BOT MOVE ---");
+            console.log(`Depth: ${customDepth}, Elo: ${currentElo}, Time Limit: 8000ms`);
+
+            fetch('/get_move', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    fen: game.fen(),
+                    elo: currentElo, // Uses UI Elo!
+                    depth: customDepth,
+                    time_limit: 8000 // CHANGE THIS TO 1500 IF YOU WANT THE BOT TO MOVE FASTER
+                })
             })
-            .catch(err => console.error("Tutor fetch error:", err));
-    }
+                .then(response => response.json())
+                .then(data => {
+                    console.log("Bot API Response:", data);
 
-    // --- TRIGGER ASSISTANCE BASED ON UI SELECTION ---
-    function triggerAssistance() {
-        var assistLevel = parseInt(document.getElementById('assistLevel').value);
-        if (assistLevel === 1) getThreatDetection();
-        else if (assistLevel === 2) getTutorHints();
-        else $tutorPanel.hide();
-    }
+                    $thinking.hide();
+                    var depthInfo = data.depth_reached ? (' [depth ' + data.depth_reached + ']') : '';
+                    $move.html('Engine responds ' + data.move + ' (' + data.time + 's)' + depthInfo);
+                    $move.show();
 
-    $('#assistLevel').on('change', triggerAssistance);
+                    game.move(data.move, { sloppy: true });
+                    board.position(game.fen());
+                    updateStatus();
 
-    // --- THE BOT'S TURN ---
-    function makeEngineMove() {
-        if (game.game_over()) return;
+                    // Use the engine's pre-computed user-perspective top replies
+                    // if available — saves a separate 3s /get_move round-trip for
+                    // Level 2 tutor hints. The supplementary search inside the C++
+                    // engine ran on this exact resulting position, so the moves
+                    // are guaranteed legal here.
+                    var assistLevel = parseInt(document.getElementById('assistLevel').value);
+                    if (assistLevel === 2 && data.user_top_3 && data.user_top_3.length > 0) {
+                        $tutorPanel.removeClass('threat-alert').show();
+                        $tutorPanel.empty();
+                        $tutorPanel.append('<strong>Tutor Ideas (Your best moves):</strong><br>');
+                        data.user_top_3.forEach(tutor => {
+                            $tutorPanel.append(`
+                            <div class="tutor-line" style="margin-bottom: 8px;">
+                                <span class="tutor-move">${tutor.move}</span>
+                                <span style="color: #4CAF50; font-weight: bold;">${tutor.tactics || "Solid Move"}</span><br>
+                                <span style="font-size: 12px; color: #aaa;">Predicted line: ${tutor.idea || "None"}</span>
+                            </div>
+                        `);
+                        });
+                    } else {
+                        triggerAssistance();
+                    }
+                })
+                .catch(err => {
+                    $thinking.hide();
+                    console.error("API Error:", err);
+                    alert("Could not connect to the engine.");
+                });
+        }
 
-        $move.hide();
-        $thinking.show();
+        var config = {
+            draggable: true,
+            position: 'start',
+            pieceTheme: 'https://chessboardjs.com/img/chesspieces/wikipedia/{piece}.png',
+            onDragStart: onDragStart,
+            onDrop: onDrop,
+            onSnapEnd: onSnapEnd
+        };
 
-        var customDepth = parseInt(document.getElementById('depthInput').value) || 5;
-        var currentElo = parseInt(document.getElementById('eloInput').value) || 2500;
+        board = Chessboard('myBoard', config);
+        updateStatus();
+        // --- GLOBAL VARIABLES FOR REPLAY STATE ---
+        window.analysisMoves = [];
+        window.currentMoveIndex = 0;
 
-        console.log("--- REQUESTING BOT MOVE ---");
-        console.log(`Depth: ${customDepth}, Elo: ${currentElo}, Time Limit: 8000ms`);
+        // --- POST-GAME ANALYSIS LOGIC ---
+        $('#analyzeBtn').on('click', function () {
+            var pgnData = game.pgn();
+            if (!pgnData) return alert("No moves to analyze!");
 
-        fetch('/get_move', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                fen: game.fen(),
-                elo: currentElo, // Uses UI Elo!
-                depth: customDepth,
-                time_limit: 8000 // CHANGE THIS TO 1500 IF YOU WANT THE BOT TO MOVE FASTER
+            $(this).text("🧠 Analyzing...").prop("disabled", true).css("opacity", "0.7");
+
+            fetch('/analyze', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ pgn: pgnData })
             })
-        })
-            .then(response => response.json())
-            .then(data => {
-                console.log("Bot API Response:", data);
+                .then(response => response.json())
+                .then(data => {
+                    $('.controls, .status-box').hide();
+                    $('#analysisView').show();
 
-                $thinking.hide();
-                $move.html('Engine responds ' + data.move + ' (' + data.time + 's)');
-                $move.show();
-
-                game.move(data.move, {sloppy: true});
-                board.position(game.fen());
-                updateStatus();
-
-                triggerAssistance();
-            })
-            .catch(err => {
-                $thinking.hide();
-                console.error("API Error:", err);
-                alert("Could not connect to the engine.");
-            });
-    }
-
-    var config = {
-        draggable: true,
-        position: 'start',
-        pieceTheme: 'https://chessboardjs.com/img/chesspieces/wikipedia/{piece}.png',
-        onDragStart: onDragStart,
-        onDrop: onDrop,
-        onSnapEnd: onSnapEnd
-    };
-
-    board = Chessboard('myBoard', config);
-    updateStatus();
-    // --- GLOBAL VARIABLES FOR REPLAY STATE ---
-    window.analysisMoves = [];
-    window.currentMoveIndex = 0;
-
-    // --- POST-GAME ANALYSIS LOGIC ---
-    $('#analyzeBtn').on('click', function() {
-        var pgnData = game.pgn();
-        if (!pgnData) return alert("No moves to analyze!");
-
-        $(this).text("🧠 Analyzing...").prop("disabled", true).css("opacity", "0.7");
-
-        fetch('/analyze', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ pgn: pgnData })
-        })
-            .then(response => response.json())
-            .then(data => {
-                $('.controls, .status-box').hide();
-                $('#analysisView').show();
-
-                var s = data.summary;
-                var evalPrefix = s.final_eval_cp > 0 ? '+' : '';
-                $('#analysisSummary').html(`
+                    var s = data.summary;
+                    var evalPrefix = s.final_eval_cp > 0 ? '+' : '';
+                    $('#analysisSummary').html(`
                 <div style="display: flex; justify-content: space-between; margin-bottom: 8px;">
                     <span><strong>Total Moves:</strong> ${s.total_moves}</span>
                     <span><strong>Final Eval:</strong> ${evalPrefix}${(s.final_eval_cp / 100).toFixed(2)}</span>
@@ -340,90 +483,91 @@
                 </div>
             `);
 
-                // Store moves globally for keyboard navigation
-                window.analysisMoves = data.moves;
-                var detailsHtml = '';
+                    // Store moves globally for keyboard navigation
+                    window.analysisMoves = data.moves;
+                    var detailsHtml = '';
 
-                // Render ALL moves, not just mistakes
-                window.analysisMoves.forEach((m, index) => {
-                    var color = "#2ecc71"; // Default Good (Green)
-                    if (m.classification === "Blunder") color = "#e74c3c";
-                    else if (m.classification === "Mistake") color = "#e67e22";
-                    else if (m.classification === "Inaccuracy") color = "#f1c40f";
+                    // Render ALL moves, not just mistakes
+                    window.analysisMoves.forEach((m, index) => {
+                        var color = "#2ecc71"; // Default Good (Green)
+                        if (m.classification === "Blunder") color = "#e74c3c";
+                        else if (m.classification === "Mistake") color = "#e67e22";
+                        else if (m.classification === "Inaccuracy") color = "#f1c40f";
 
-                    var explanationText = m.explanation ? m.explanation : "Standard positional move.";
+                        var explanationText = m.explanation ? m.explanation : "Standard positional move.";
 
-                    detailsHtml += `
+                        detailsHtml += `
                     <div id="card-${index}" class="analysis-card" onclick="goToMove(${index})" style="background: #222; padding: 12px; border-left: 4px solid ${color}; margin-bottom: 10px; border-radius: 4px;">
                         <strong style="color: white;">Move ${m.move_number} (${m.color}): ${m.san}</strong>
                         <span style="float: right; color: ${color}; font-weight: bold; font-size: 12px; text-transform: uppercase;">${m.classification}</span><br>
                         <span style="font-size: 14px; color: #aaa; display: block; margin-top: 5px; line-height: 1.4;">${explanationText}</span>
                     </div>
                 `;
+                    });
+
+                    $('#analysisDetails').html(detailsHtml);
+
+                    // Auto-start at the very first move
+                    setTimeout(() => { goToMove(0); }, 100);
+                })
+                .catch(err => {
+                    console.error("Analysis failed:", err);
+                    $('#analyzeBtn').text("🔍 Analyze Game").prop("disabled", false).css("opacity", "1");
                 });
+        });
 
-                $('#analysisDetails').html(detailsHtml);
+        // --- NAVIGATION & HIGHLIGHTING ENGINE ---
+        window.goToMove = function (index) {
+            if (index < 0 || index >= window.analysisMoves.length) return; // Prevent going out of bounds
 
-                // Auto-start at the very first move
-                setTimeout(() => { goToMove(0); }, 100);
-            })
-            .catch(err => {
-                console.error("Analysis failed:", err);
-                $('#analyzeBtn').text("🔍 Analyze Game").prop("disabled", false).css("opacity", "1");
-            });
-    });
+            window.currentMoveIndex = index;
+            var m = window.analysisMoves[index];
 
-    // --- NAVIGATION & HIGHLIGHTING ENGINE ---
-    window.goToMove = function(index) {
-        if (index < 0 || index >= window.analysisMoves.length) return; // Prevent going out of bounds
+            // 1. Update the physical chessboard
+            board.position(m.fen_after);
+            $('#myBoard .square-55d63').removeClass('highlight-move highlight-blunder highlight-mistake highlight-inaccuracy highlight-good');
+            $('#myBoard .square-' + m.from_sq).addClass('highlight-move');
+            $('#myBoard .square-' + m.to_sq).addClass('highlight-move');
+            $('#myBoard .square-' + m.to_sq).addClass('highlight-' + m.classification.toLowerCase());
 
-        window.currentMoveIndex = index;
-        var m = window.analysisMoves[index];
+            // 2. Manage the UI highlighting for the cards
+            $('.analysis-card').removeClass('active-card'); // Strip active class from all
+            $('#card-' + index).addClass('active-card');    // Add to current
 
-        // 1. Update the physical chessboard
-        board.position(m.fen_after);
-        $('#myBoard .square-55d63').removeClass('highlight-move highlight-blunder highlight-mistake highlight-inaccuracy highlight-good');
-        $('#myBoard .square-' + m.from_sq).addClass('highlight-move');
-        $('#myBoard .square-' + m.to_sq).addClass('highlight-move');
-        $('#myBoard .square-' + m.to_sq).addClass('highlight-' + m.classification.toLowerCase());
+            // 3. Auto-scroll the list so the active card is always visible
+            document.getElementById('card-' + index).scrollIntoView({ behavior: 'smooth', block: 'center' });
+        };
 
-        // 2. Manage the UI highlighting for the cards
-        $('.analysis-card').removeClass('active-card'); // Strip active class from all
-        $('#card-' + index).addClass('active-card');    // Add to current
-
-        // 3. Auto-scroll the list so the active card is always visible
-        document.getElementById('card-' + index).scrollIntoView({ behavior: 'smooth', block: 'center' });
-    };
-
-    // --- KEYBOARD CONTROLS ---
-    document.addEventListener('keydown', function(e) {
-        // Only trigger arrow keys if the analysis view is currently open
-        if ($('#analysisView').is(':visible')) {
-            if (e.key === "ArrowRight" || e.key === "ArrowDown") {
-                e.preventDefault(); // Stop the whole web page from scrolling down
-                goToMove(window.currentMoveIndex + 1);
-            } else if (e.key === "ArrowLeft" || e.key === "ArrowUp") {
-                e.preventDefault();
-                goToMove(window.currentMoveIndex - 1);
+        // --- KEYBOARD CONTROLS ---
+        document.addEventListener('keydown', function (e) {
+            // Only trigger arrow keys if the analysis view is currently open
+            if ($('#analysisView').is(':visible')) {
+                if (e.key === "ArrowRight" || e.key === "ArrowDown") {
+                    e.preventDefault(); // Stop the whole web page from scrolling down
+                    goToMove(window.currentMoveIndex + 1);
+                } else if (e.key === "ArrowLeft" || e.key === "ArrowUp") {
+                    e.preventDefault();
+                    goToMove(window.currentMoveIndex - 1);
+                }
             }
-        }
-    });
+        });
 
-    // --- VISUAL BOARD UPDATER ---
-    window.showPosition = function(fen, fromSq, toSq, classification) {
-        // 1. Update the pieces on the board
-        board.position(fen);
+        // --- VISUAL BOARD UPDATER ---
+        window.showPosition = function (fen, fromSq, toSq, classification) {
+            // 1. Update the pieces on the board
+            board.position(fen);
 
-        // 2. Clear all previous highlights
-        $('#myBoard .square-55d63').removeClass('highlight-move highlight-blunder highlight-mistake highlight-inaccuracy');
+            // 2. Clear all previous highlights
+            $('#myBoard .square-55d63').removeClass('highlight-move highlight-blunder highlight-mistake highlight-inaccuracy');
 
-        // 3. Highlight where the piece came from and went to (Yellow background)
-        $('#myBoard .square-' + fromSq).addClass('highlight-move');
-        $('#myBoard .square-' + toSq).addClass('highlight-move');
+            // 3. Highlight where the piece came from and went to (Yellow background)
+            $('#myBoard .square-' + fromSq).addClass('highlight-move');
+            $('#myBoard .square-' + toSq).addClass('highlight-move');
 
-        // 4. Add the severe colored ring to the destination square based on how bad the move was
-        $('#myBoard .square-' + toSq).addClass('highlight-' + classification.toLowerCase());
-    };
-</script>
+            // 4. Add the severe colored ring to the destination square based on how bad the move was
+            $('#myBoard .square-' + toSq).addClass('highlight-' + classification.toLowerCase());
+        };
+    </script>
 </body>
+
 </html>
