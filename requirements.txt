@@ -1,0 +1,15 @@
+# API / tutor
+fastapi
+uvicorn
+chess
+matplotlib
+
+# tests
+pytest
+httpx
+
+# training only (install a CUDA build of torch from pytorch.org for GPU training)
+# torch
+# numpy
+# zstandard
+# requests

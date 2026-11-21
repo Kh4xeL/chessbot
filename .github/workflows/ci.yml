@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Stockfish (used by the analysis endpoints)
+        run: sudo apt-get update && sudo apt-get install -y stockfish
+
+      - name: Build engine (portable AVX2 build)
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DENGINE_NATIVE=OFF
+          cmake --build build -j
+
+      - name: Engine self-tests
+        run: build/engine --test
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: API tests
+        run: pytest tests/ -q

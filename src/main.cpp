@@ -16,6 +16,7 @@
  *       newgame                                clears the hash tables
  *       quit
  *   engine --selftest                          checks the CNN against PyTorch output
+ *   engine --test                              all engine self-checks (NNUE, SEE, mates, ...)
  *   engine --bench [ms]                        search speed on a few positions
  *   --threads N                                (any mode) Lazy SMP search threads, default 1
  *
@@ -824,6 +825,8 @@ int bench(long long ms) {
     return 0;
 }
 
+#include "tests.hpp"
+
 int main(int argc, char* argv_in[]) {
     std::ios::sync_with_stdio(false);
     // "--threads N" may appear anywhere; strip it before the positional arguments are read.
@@ -847,6 +850,7 @@ int main(int argc, char* argv_in[]) {
 
     std::string mode = argv[1];
     if (mode == "--selftest") return selftest(argv[0]);
+    if (mode == "--test") return tests::run(argv[0]);
     if (mode == "--bench") return bench(argc >= 3 ? std::stoll(argv[2]) : 2000);
 
     if (mode == "--server") {
