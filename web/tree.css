@@ -1,0 +1,67 @@
+#treeContainer svg {
+    font-family: 'Inter', sans-serif;
+    background-color: transparent;
+}
+
+.d3 .node circle {
+    fill: #222;
+    stroke: #aaa;
+    stroke-width: 2.5px;
+}
+
+.d3 .node {
+    font-size: 14px;
+    cursor: pointer;
+}
+
+.d3 .link {
+    fill: none;
+    stroke: #555;
+    stroke-width: 2px;
+}
+
+.d3 .link.link_VARIATION {
+    stroke-linecap: square;
+    stroke-dasharray: 4,4;
+}
+
+.d3 .node_MAINLINE circle { stroke: #aaa; }
+.d3 .node_MAINLINE circle.children { fill: #555; }
+.d3 .node_MAINLINE text { fill: #ddd; }
+
+.d3 .node_Good circle, .d3 .node_Best circle { stroke: #27ae60; }
+.d3 .node_Good circle.children, .d3 .node_Best circle.children { fill: #2ecc71; }
+.d3 .node_Good text, .d3 .node_Best text { fill: #2ecc71; }
+
+.d3 .node_Inaccuracy circle { stroke: #f39c12; }
+.d3 .node_Inaccuracy circle.children { fill: #f1c40f; }
+.d3 .node_Inaccuracy text { fill: #f1c40f; }
+
+.d3 .node_Mistake circle { stroke: #d35400; }
+.d3 .node_Mistake circle.children { fill: #e67e22; }
+.d3 .node_Mistake text { fill: #e67e22; }
+
+.d3 .node_Blunder circle { stroke: #c0392b; }
+.d3 .node_Blunder circle.children { fill: #e74c3c; }
+.d3 .node_Blunder text { fill: #e74c3c; }
+
+.d3 .node_Book circle { stroke: #2980b9; }
+.d3 .node_Book circle.children { fill: #3498db; }
+.d3 .node_Book text { fill: #3498db; }
+
+.d3 .node_Brilliant circle { stroke: #8e44ad; }
+.d3 .node_Brilliant circle.children { fill: #9b59b6; }
+.d3 .node_Brilliant text { fill: #9b59b6; }
+
+.d3 .node_root circle { stroke: #fff; }
+.d3 .node_root circle.children { fill: #fff; }
+.d3 .node_root text { fill: #fff; font-weight: bold; }
+
+.d3 .node.active-tree-node circle {
+    stroke: #fff !important;
+    stroke-width: 4px;
+}
+.d3 .node.active-tree-node text {
+    font-weight: bold;
+    text-decoration: underline;
+}

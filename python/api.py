@@ -8,7 +8,10 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+import atexit
 import subprocess
+import threading
 import chess
 import chess.polyglot
 import os
@@ -27,16 +30,98 @@ app.add_middleware(
 # --- API Request Models ---
 class MoveRequest(BaseModel):
     fen: str
-    elo: int = 2500
-    depth: int = 4
-    time_limit: int = 10000 # Time limit in milliseconds
+    elo: int = 2500         # >= 2900 means full strength; lower Elo caps depth and adds human-like choice
+    depth: int = 99         # maximum search depth (the time limit usually stops it first)
+    time_limit: int = 3000  # Time limit in milliseconds
 
 # --- Path Resolution ---
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
 HTML_PATH = os.path.join(PROJECT_ROOT, "web", "index.html")
+WEB_DIR = os.path.join(PROJECT_ROOT, "web")
 BOOK_PATH = os.path.join(PROJECT_ROOT, "assets", "book.bin")
-ENGINE_PATH = os.path.join(PROJECT_ROOT, "build", "engine")
+
+# Serve static files from the web directory
+app.mount("/web", StaticFiles(directory=WEB_DIR), name="web")
+
+
+def _find_engine():
+    """The engine can be built by CLion (cmake-build-release) or by hand (build/)."""
+    names = ["engine.exe", "engine"] if os.name == "nt" else ["engine"]
+    for d in ["cmake-build-release", "build", "cmake-build-relwithdebinfo", "cmake-build-debug"]:
+        for n in names:
+            p = os.path.join(PROJECT_ROOT, d, n)
+            if os.path.isfile(p):
+                return p
+    return os.path.join(PROJECT_ROOT, "build", names[0])
+
+
+ENGINE_PATH = _find_engine()
+FULL_STRENGTH = 3000
+
+
+class EngineProcess:
+    """Keeps one engine running in --server mode. Starting a process per request
+    cost more than the search itself, and the hash table now survives between
+    moves. Requests are serialised with a lock (the engine is single-threaded)."""
+
+    def __init__(self, path):
+        self.path = path
+        self.proc = None
+        self.lock = threading.Lock()
+
+    def _start(self):
+        self.proc = subprocess.Popen(
+            [self.path, "--server"], cwd=PROJECT_ROOT, text=True, bufsize=1,
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=None)
+        line = self.proc.stdout.readline().strip()
+        if line != "READY":
+            self.proc.kill()
+            self.proc = None
+            raise RuntimeError(f"engine failed to start: {line}")
+
+    def _go_locked(self, fen, elo, depth, time_ms):
+        if self.proc is None or self.proc.poll() is not None:
+            self._start()
+        self.proc.stdin.write(f"go {int(elo)} {int(depth)} {int(time_ms)} {fen}\n")
+        self.proc.stdin.flush()
+        lines = []
+        while True:
+            line = self.proc.stdout.readline()
+            if not line:
+                raise RuntimeError("engine exited unexpectedly")
+            line = line.rstrip("\r\n")
+            if line == "END":
+                return "\n".join(lines)
+            lines.append(line)
+
+    def go(self, fen, elo, depth, time_ms):
+        """Returns the engine's output block (BEST_MOVE:..., RANK:..., ...)."""
+        with self.lock:
+            try:
+                return self._go_locked(fen, elo, depth, time_ms)
+            except (RuntimeError, OSError):
+                self.close()
+                return self._go_locked(fen, elo, depth, time_ms)  # one retry with a fresh process
+
+    def close(self):
+        if self.proc is not None:
+            try:
+                self.proc.kill()
+            except OSError:
+                pass
+            self.proc = None
+
+
+ENGINE = EngineProcess(ENGINE_PATH)
+atexit.register(ENGINE.close)
+
+
+def engine_best_move(fen, elo, depth, time_ms):
+    for line in ENGINE.go(fen, elo, depth, time_ms).split("\n"):
+        if line.startswith("BEST_MOVE:"):
+            return line.split(":", 1)[1].strip()
+    return None
 
 PIECE_NAMES = {1: "Pawn", 2: "Knight", 3: "Bishop", 4: "Rook", 5: "Queen", 6: "King"}
 
@@ -138,18 +223,14 @@ def calculate_move(request: MoveRequest):
         raise HTTPException(status_code=500, detail="C++ Engine executable not found!")
 
     try:
-        # 2. Call the C++ Engine Subprocess
+        # 2. Ask the persistent C++ engine
         start_time = time.time()
-        result = subprocess.run(
-            [ENGINE_PATH, request.fen, str(request.elo), str(request.depth), str(request.time_limit)],
-            capture_output=True,
-            text=True,
-            check=True
-        )
+        engine_output = ENGINE.go(request.fen, request.elo, request.depth, request.time_limit)
         end_time = time.time()
         calculation_time = round(end_time - start_time, 2)
 
         best_move = None
+        eval_score = 0.0
         depth_reached = 0
         top_moves = []
         user_top_moves = []
@@ -160,10 +241,15 @@ def calculate_move(request: MoveRequest):
         # and USER_RANK:1|MOVE:c7c5|IDEA:... (top user replies on the position
         # AFTER the bot plays best_move; pre-computed in the same engine call
         # using a TT-warm supplementary search).
-        for line in result.stdout.split('\n'):
+        for line in engine_output.split('\n'):
             line = line.strip()
             if line.startswith("BEST_MOVE:"):
                 best_move = line.split(":")[1].strip()
+            elif line.startswith("EVAL:"):
+                try:
+                    eval_score = float(line.split(":")[1].strip())
+                except ValueError:
+                    eval_score = 0.0
             elif line.startswith("DEPTH_REACHED:"):
                 try:
                     depth_reached = int(line.split(":")[1].strip())
@@ -216,9 +302,10 @@ def calculate_move(request: MoveRequest):
         if best_move:
             return {
                 "move": best_move,
-                "engine": "Hybrid AlphaZero C++",
+                "engine": "Hybrid NNUE C++",
                 "depth": request.depth,
                 "depth_reached": depth_reached,
+                "eval_pawns": eval_score,
                 "time": calculation_time,
                 "top_3": top_moves,
                 "user_top_3": user_top_3,
@@ -226,8 +313,8 @@ def calculate_move(request: MoveRequest):
 
         raise HTTPException(status_code=500, detail="Engine failed to return a move format.")
 
-    except subprocess.CalledProcessError as e:
-        raise HTTPException(status_code=500, detail=f"C++ Engine crashed: {e.stderr}")
+    except (RuntimeError, OSError) as e:
+        raise HTTPException(status_code=500, detail=f"C++ Engine error: {e}")
 
 
 class ThreatRequest(BaseModel):
@@ -246,14 +333,11 @@ def check_threats(request: ThreatRequest):
     if board.is_check():
         return {"threat": "You are in check! You must defend your King!", "hint": None, "is_threat": True}
 
-    # 1. Quick hint generation (Shallow search on real board)
+    # 1. Quick hint generation (full-strength search on the real board)
     hint_move_uci = None
     try:
-        hint_res = subprocess.run([ENGINE_PATH, request.fen, str(request.elo), "3", "1000"], capture_output=True, text=True)
-        for line in hint_res.stdout.split('\n'):
-            if line.startswith("BEST_MOVE:"):
-                hint_move_uci = line.split(":")[1].strip()
-    except:
+        hint_move_uci = engine_best_move(request.fen, FULL_STRENGTH, 99, 600)
+    except (RuntimeError, OSError):
         pass
 
     # 2. Pass the turn to the opponent to expose their threats
@@ -265,14 +349,8 @@ def check_threats(request: ThreatRequest):
     null_fen = board.fen()
 
     try:
-        # Give the engine 1.5 seconds to find the opponent's master plan
-        threat_res = subprocess.run([ENGINE_PATH, null_fen, str(request.elo), "4", "1500"], capture_output=True, text=True)
-
-        threat_move_uci = None
-        for line in threat_res.stdout.split('\n'):
-            if line.startswith("BEST_MOVE:"):
-                threat_move_uci = line.split(":")[1].strip()
-                break
+        # Let the engine find the opponent's most dangerous move if they could move twice
+        threat_move_uci = engine_best_move(null_fen, FULL_STRENGTH, 99, 800)
 
         if threat_move_uci and threat_move_uci != "0000":
             m = chess.Move.from_uci(threat_move_uci)
@@ -333,12 +411,12 @@ def check_threats(request: ThreatRequest):
             if not is_threat:
                 threat_msg = "Position seems stable. No immediate tactical threats detected."
 
-            return {"threat": threat_msg, "hint": hint_move_uci, "is_threat": is_threat}
+            return {"threat": threat_msg, "hint": hint_move_uci, "is_threat": is_threat, "threat_move": threat_move_uci}
 
-        return {"threat": "Position seems stable.", "hint": hint_move_uci, "is_threat": False}
+        return {"threat": "Position seems stable.", "hint": hint_move_uci, "is_threat": False, "threat_move": None}
 
-    except subprocess.CalledProcessError:
-        return {"threat": "Could not analyze threats.", "hint": None, "is_threat": False}
+    except (RuntimeError, OSError):
+        return {"threat": "Could not analyze threats.", "hint": None, "is_threat": False, "threat_move": None}
 
 
 from .semantic_analysis import analyze_pgn as _analyze_pgn
@@ -350,6 +428,56 @@ class AnalyzeRequest(BaseModel):
 @app.post("/analyze")
 def analyze_game(request: AnalyzeRequest):
     try:
-        return _analyze_pgn(request.pgn)
+        pgn_data = request.pgn.strip()
+        # If it looks like a bare FEN string, wrap it in a PGN structure
+        if pgn_data.count('/') >= 7 and " " in pgn_data and not pgn_data.startswith("["):
+            pgn_data = f'[FEN "{pgn_data}"]\n\n'
+            
+        return _analyze_pgn(pgn_data)
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+class ExploreRequest(BaseModel):
+    fen: str
+    move: str
+
+@app.post("/explore_move")
+def explore_move(request: ExploreRequest):
+    import chess.engine
+    from .semantic_analysis import STOCKFISH_PATH, clamp, EVAL_CAP, classify_move
+    
+    try:
+        board = chess.Board(request.fen)
+        color = board.turn
+        
+        with chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH) as engine:
+            # Eval before
+            info_before = engine.analyse(board, chess.engine.Limit(time=0.05))
+            prev_score = clamp(info_before["score"].white().score(mate_score=10000), -EVAL_CAP, EVAL_CAP)
+            
+            # Push custom move
+            m = chess.Move.from_uci(request.move)
+            board.push(m)
+                
+            # Eval after
+            info_after = engine.analyse(board, chess.engine.Limit(time=0.05))
+            curr_score = clamp(info_after["score"].white().score(mate_score=10000), -EVAL_CAP, EVAL_CAP)
+            
+            delta = (prev_score - curr_score) if color == chess.WHITE else (curr_score - prev_score)
+            classification = classify_move(delta)
+            if board.is_checkmate():
+                classification = "Perfect"
+            
+            best_reply = info_after.get("pv", [None])[0]
+            best_reply_uci = best_reply.uci() if best_reply else None
+            
+            return {
+                "eval_pawns": round(curr_score / 100, 2),
+                "classification": classification,
+                "best_reply": best_reply_uci,
+                "fen_after": board.fen(),
+                "san": chess.Board(request.fen).san(m),
+                "is_checkmate": board.is_checkmate()
+            }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

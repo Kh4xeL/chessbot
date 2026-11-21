@@ -9,6 +9,9 @@
     <link rel="stylesheet" href="https://unpkg.com/@chrisoakman/chessboardjs@1.0.0/dist/chessboard-1.0.0.min.css">
     <script src="https://unpkg.com/@chrisoakman/chessboardjs@1.0.0/dist/chessboard-1.0.0.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/chess.js/0.10.3/chess.min.js"></script>
+    <script src="https://d3js.org/d3.v3.min.js"></script>
+    <link rel="stylesheet" href="/web/tree.css">
+    <script src="/web/tree.js"></script>
 
     <style>
         body {
@@ -130,7 +133,49 @@
         }
 
         .highlight-inaccuracy {
-            box-shadow: inset 0 0 5px 4px rgba(241, 196, 15, 0.9) !important;
+            box-shadow: inset 0 0 3px 3px #f1c40f;
+        }
+
+        /* Tree View Styles */
+        .tree-ul {
+            list-style-type: none;
+            padding-left: 20px;
+            border-left: 1px dashed #666;
+            margin: 5px 0;
+        }
+        .tree-ul:first-child {
+            border-left: none;
+            padding-left: 0;
+        }
+        .tree-li {
+            position: relative;
+            margin: 6px 0;
+            line-height: 1.5;
+        }
+        .tree-li::before {
+            content: "";
+            position: absolute;
+            top: 10px;
+            left: -20px;
+            width: 15px;
+            border-top: 1px dashed #666;
+        }
+        .tree-ul:first-child > .tree-li::before {
+            display: none;
+        }
+        .tree-node {
+            cursor: pointer;
+            padding: 2px 6px;
+            border-radius: 4px;
+            transition: all 0.2s;
+        }
+        .tree-node:hover {
+            color: #4CAF50 !important;
+            background: #333;
+        }
+        .tree-node.active-tree-node {
+            background: #4CAF50 !important;
+            color: white !important;
         }
 
         /* Make the cards look clickable */
@@ -151,6 +196,38 @@
             border-left-width: 8px !important;
             box-shadow: 0 4px 10px rgba(0, 0, 0, 0.3);
         }
+
+        /* Start & Import Pages */
+        .start-card {
+            background-color: #2d2d2d;
+            padding: 30px;
+            border-radius: 12px;
+            width: 250px;
+            cursor: pointer;
+            box-shadow: 0 8px 20px rgba(0,0,0,0.4);
+            transition: transform 0.2s, background-color 0.2s;
+            text-align: center;
+            border: 2px solid transparent;
+        }
+        .start-card:hover {
+            transform: translateY(-5px);
+            background-color: #383838;
+            border-color: #4CAF50;
+        }
+        .start-card h3 { color: #4CAF50; margin-top: 0; }
+        .start-card p { color: #ccc; font-size: 14px; line-height: 1.5; }
+        
+        .back-btn {
+            background: none;
+            border: none;
+            color: #aaa;
+            font-size: 14px;
+            cursor: pointer;
+            padding: 5px 0;
+            text-align: left;
+            transition: color 0.2s;
+        }
+        .back-btn:hover { color: #fff; }
     </style>
 </head>
 
@@ -158,12 +235,37 @@
 
     <h2>Hybrid AI Chess Tutor</h2>
 
-    <div
-        style="display: flex; gap: 30px; align-items: flex-start; justify-content: center; width: 100%; max-width: 1100px;">
+    <!-- START PAGE -->
+    <div id="startPage" style="display: flex; gap: 40px; justify-content: center; margin-top: 50px;">
+        <div class="start-card" onclick="showPlayPage()">
+            <h3>♟️ Play vs Engine</h3>
+            <p>Challenge the Hybrid AlphaZero engine with real-time tutor assistance.</p>
+        </div>
+        <div class="start-card" onclick="showImportPage()">
+            <h3>📁 Import Game</h3>
+            <p>Paste a PGN or FEN to get a full semantic post-game analysis.</p>
+        </div>
+    </div>
 
-        <div id="gameColumn">
+    <!-- IMPORT PAGE -->
+    <div id="importPage" style="display: none; width: 600px; text-align: center; margin-top: 20px;">
+        <div style="text-align: left; margin-bottom: 10px;">
+            <button class="back-btn" onclick="showStartPage()">← Back to Start</button>
+        </div>
+        <h3 style="margin-bottom: 20px; color: #4CAF50;">Import Game for Analysis</h3>
+        <textarea id="importText" rows="10" style="width: 100%; background: #222; color: #fff; border: 1px solid #555; padding: 10px; border-radius: 6px; font-family: monospace; resize: vertical;" placeholder="Paste your PGN or FEN here..."></textarea>
+        <button id="importAnalyzeBtn" style="width: 100%; margin-top: 15px; padding: 12px; background-color: #3665cd; color: white; font-weight: bold; border: none; border-radius: 5px; cursor: pointer; font-size: 16px; transition: 0.2s;">🔍 Run Analysis</button>
+    </div>
+
+    <!-- MAIN APP VIEW (Play & Analysis) -->
+    <div id="appView" style="display: none; gap: 30px; align-items: flex-start; justify-content: center; width: 100%; max-width: 1100px;">
+
+        <div id="gameColumn" style="position: relative; display: flex; flex-direction: column; align-items: center;">
+            <div style="position: absolute; top: -30px; left: 0;">
+                <button class="back-btn" onclick="showStartPage()">← Back to Start</button>
+            </div>
             <div class="controls">
-                <label>Engine Depth: <input type="number" id="depthInput" value="5" min="1" max="12"
+                <label>Max Depth: <input type="number" id="depthInput" value="30" min="1" max="60"
                         style="width: 50px;"></label>
                 <label>AI Elo:
                     <input type="range" id="eloInput" min="800" max="3000" value="2500" step="100"
@@ -177,9 +279,21 @@
                         <option value="2">Level 2: Maximum (Top 3 & Ideas)</option>
                     </select>
                 </label>
+                <label><input type="checkbox" id="showEvalBar" checked onchange="document.getElementById('evalBarContainer').style.display = this.checked ? 'flex' : 'none'"> Eval Bar</label>
+                <label><input type="checkbox" id="showArrows" checked onchange="if(!this.checked) document.getElementById('arrowLayer').innerHTML=''; else triggerAssistance()"> Arrows</label>
             </div>
 
-            <div id="myBoard"></div>
+            <div style="display: flex; gap: 10px; align-items: stretch; justify-content: center; width: 100%;">
+                <div id="evalBarContainer" style="width: 15px; background: #333; border-radius: 4px; display: flex; flex-direction: column-reverse; overflow: hidden; height: 500px;">
+                    <div id="whiteMaterialBar" style="background: white; width: 100%; height: 50%; transition: height 0.3s;"></div>
+                    <div id="blackMaterialBar" style="background: black; width: 100%; flex-grow: 1;"></div>
+                </div>
+                
+                <div style="position: relative; width: 500px; margin: 0;">
+                    <div id="myBoard"></div>
+                    <svg id="arrowLayer" style="position: absolute; top: 0; left: 0; pointer-events: none; width: 100%; height: 100%; z-index: 100;"></svg>
+                </div>
+            </div>
 
             <div class="status-box">
                 <div id="status">White to move</div>
@@ -196,40 +310,24 @@
 
         <div id="analysisView"
             style="display: none; background-color: #2d2d2d; padding: 20px; border-radius: 8px; width: 450px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); text-align: left;">
-            <h3 style="margin-top: 0; color: #4CAF50; border-bottom: 1px solid #444; padding-bottom: 10px;">Post-Game
-                Analysis</h3>
-            <div id="analysisSummary"
-                style="margin-bottom: 20px; font-size: 14px; background: #222; padding: 15px; border-radius: 6px;">
+            <h3 style="margin-top: 0; color: #4CAF50; border-bottom: 1px solid #444; padding-bottom: 10px; display: flex; justify-content: space-between; align-items: center;">
+                Post-Game Analysis
+                <button id="toggleViewBtn" onclick="toggleAnalysisView()" style="padding: 6px 12px; background: #4CAF50; color: #fff; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; font-weight: bold; transition: background 0.2s;">🌲 Tree View</button>
+            </h3>
+            <div id="analysisSummary" style="background: #333; padding: 12px; border-radius: 6px; margin-bottom: 15px;"></div>
+            
+            <div id="listContainer" style="display: block;">
+                <div id="analysisDetails" style="max-height: 60vh; overflow-y: auto; padding-right: 10px; scroll-behavior: smooth;"></div>
             </div>
-            <div id="analysisDetails"
-                style="max-height: 65vh; overflow-y: auto; padding-right: 10px; scroll-behavior: smooth;"></div>
-            <button onclick="location.reload()"
+            
+            <div id="treeContainer" style="display: none; height: 60vh; overflow: hidden; background: #222; border-radius: 6px;"></div>
+            
+            <button onclick="showStartPage()"
                 style="margin-top: 20px; padding: 10px; background: #444; color: white; font-weight: bold; border: none; border-radius: 4px; cursor: pointer; width: 100%;">
-                Play Again
+                Play Again / New Game
             </button>
         </div>
 
-    </div>
-
-    <button id="analyzeBtn"
-        style="display: none; margin-top: 15px; padding: 12px 24px; background-color: #3665cd; color: white; font-weight: bold; border: none; border-radius: 5px; cursor: pointer; font-size: 16px; transition: 0.2s;">
-        🔍 Analyze Game
-    </button>
-
-    <div id="analysisView"
-        style="display: none; background-color: #2d2d2d; padding: 20px; border-radius: 8px; width: 560px; margin-top: 20px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); text-align: left;">
-        <h3 style="margin-top: 0; color: #4CAF50; border-bottom: 1px solid #444; padding-bottom: 10px;">Post-Game
-            Analysis</h3>
-
-        <div id="analysisSummary"
-            style="margin-bottom: 20px; font-size: 14px; background: #222; padding: 15px; border-radius: 6px;"></div>
-
-        <div id="analysisDetails" style="max-height: 400px; overflow-y: auto; padding-right: 10px;"></div>
-
-        <button onclick="location.reload()"
-            style="margin-top: 20px; padding: 10px; background: #444; color: white; font-weight: bold; border: none; border-radius: 4px; cursor: pointer; width: 100%;">
-            Play Again
-        </button>
     </div>
 
     <script>
@@ -239,19 +337,49 @@
         var $thinking = $('#thinking');
         var $move = $('#move');
         var $tutorPanel = $('#tutorPanel');
+        var appMode = 'PLAY';
+        var currentViewMode = 'LIST';
+        var branchColors = { 'main': 'transparent' };
+        var predefinedColors = [
+            '#e74c3c', '#3498db', '#f1c40f', '#9b59b6', '#e67e22', 
+            '#1abc9c', '#ff7979', '#badc58', '#e056fd', '#fdcb6e',
+            '#00b894', '#d63031', '#0984e3', '#6c5ce7', '#e84393'
+        ];
+        var colorIndex = 0;
+
+        function getBranchColor(bid) {
+            if(!branchColors[bid]) {
+                branchColors[bid] = predefinedColors[colorIndex % predefinedColors.length];
+                colorIndex++;
+            }
+            return branchColors[bid];
+        }
+
+        function toggleAnalysisView() {
+            currentViewMode = currentViewMode === 'LIST' ? 'TREE' : 'LIST';
+            $('#toggleViewBtn').text(currentViewMode === 'LIST' ? '🌲 Tree View' : '📋 List View');
+            $('#listContainer').toggle();
+            $('#treeContainer').toggle();
+            if (currentViewMode === 'TREE') renderTreeView();
+        }
 
         function onDragStart(source, piece, position, orientation) {
             if (game.game_over()) return false;
-            if (piece.search(/^b/) !== -1) return false;
+            if (appMode === 'PLAY' && piece.search(/^b/) !== -1) return false;
         }
 
         function onDrop(source, target) {
+            var oldFen = game.fen();
             var move = game.move({ from: source, to: target, promotion: 'q' });
             if (move === null) return 'snapback';
 
-            updateStatus();
-            $tutorPanel.hide(); // Hide tutor while bot thinks
+            if (appMode === 'ANALYSIS') {
+                exploreCustomMove(oldFen, move, source, target);
+                return;
+            }
 
+            updateStatus();
+            $tutorPanel.hide();
             window.setTimeout(makeEngineMove, 250);
         }
 
@@ -263,11 +391,11 @@
 
             if (game.in_checkmate()) {
                 statusHTML = 'Game over, ' + moveColor + ' is in checkmate.';
-                $('#analyzeBtn').show(); // Show the Analyze button!
+                $('#analyzeBtn').show();
             }
             else if (game.in_draw()) {
                 statusHTML = 'Game over, drawn position';
-                $('#analyzeBtn').show(); // Show the Analyze button!
+                $('#analyzeBtn').show();
             }
             else {
                 statusHTML = moveColor + ' to move';
@@ -276,33 +404,31 @@
             $status.html(statusHTML);
         }
 
-        // --- LEVEL 1: THREAT DETECTION ---
         function getThreatDetection() {
             if (game.game_over() || game.turn() !== 'w') return;
-
             var currentElo = parseInt(document.getElementById('eloInput').value) || 2500;
-
             $tutorPanel.removeClass('threat-alert').html('<span style="color:#888;">Scanning for immediate threats...</span>').show();
 
             fetch('/get_threats', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ fen: game.fen(), elo: currentElo }) // Uses UI Elo
+                body: JSON.stringify({ fen: game.fen(), elo: currentElo })
             })
                 .then(res => res.json())
                 .then(data => {
-                    if (game.turn() !== 'w') return; // Ignore if user moved
-
+                    if (game.turn() !== 'w') return;
                     $tutorPanel.empty();
-
+                    $('#arrowLayer').empty();
                     if (data.is_threat) {
                         $tutorPanel.addClass('threat-alert');
                         $tutorPanel.append(`<strong>🚨 Tactical Alert:</strong><br><span style="color:#ffcccc;">${data.threat}</span>`);
+                        if (document.getElementById('showArrows').checked && data.threat_move) {
+                            drawArrow(data.threat_move.substring(0,2), data.threat_move.substring(2,4), '#e74c3c', 0.9);
+                        }
                     } else {
                         $tutorPanel.removeClass('threat-alert');
                         $tutorPanel.append(`<strong>🛡️ Coast is clear:</strong><br><span style="color:#ccc;">${data.threat}</span>`);
                     }
-
                     if (data.hint) {
                         $tutorPanel.append(`
                         <details style="margin-top: 12px; cursor: pointer; background: #333; padding: 8px; border-radius: 4px; border: 1px solid #555;">
@@ -312,41 +438,32 @@
                             </div>
                         </details>
                     `);
+                        if (document.getElementById('showArrows').checked && !data.is_threat) {
+                            drawArrow(data.hint.substring(0,2), data.hint.substring(2,4), '#2ecc71', 0.8);
+                        }
                     }
                 })
                 .catch(err => console.error("Threat fetch error:", err));
         }
 
-        // --- LEVEL 2: MAXIMUM ASSISTANCE ---
         function getTutorHints() {
             if (game.game_over() || game.turn() !== 'w') return;
-
-            console.log("--- REQUESTING LEVEL 2 (PV & TACTICS) ---");
             $tutorPanel.removeClass('threat-alert').html('<span style="color:#888;">Tutor is analyzing your best options...</span>').show();
-
-            var currentDepth = parseInt(document.getElementById('depthInput').value) || 5;
             var currentElo = parseInt(document.getElementById('eloInput').value) || 2500;
-
             fetch('/get_move', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    fen: game.fen(),
-                    elo: currentElo, // Uses UI Elo
-                    depth: 5,
-                    time_limit: 3000
-                })
+                // Tutor hints always come from the full-strength engine, whatever the bot's Elo.
+                body: JSON.stringify({ fen: game.fen(), elo: 3000, depth: 99, time_limit: 2000 })
             })
                 .then(response => response.json())
                 .then(data => {
                     if (game.turn() !== 'w') return;
-
-                    console.log("Level 2 API Response:", data);
                     $tutorPanel.empty();
+                    $('#arrowLayer').empty();
                     $tutorPanel.append('<strong>Tutor Ideas (Your best moves):</strong><br>');
-
                     if (data.top_3 && data.top_3.length > 0) {
-                        data.top_3.forEach(tutor => {
+                        data.top_3.forEach((tutor, idx) => {
                             $tutorPanel.append(`
                             <div class="tutor-line" style="margin-bottom: 8px;">
                                 <span class="tutor-move">${tutor.move}</span>
@@ -354,15 +471,16 @@
                                 <span style="font-size: 12px; color: #aaa;">Predicted line: ${tutor.idea || "None"}</span>
                             </div>
                         `);
+                            if (document.getElementById('showArrows').checked) {
+                                var color = (idx === 0) ? '#2ecc71' : (idx === 1 ? '#f1c40f' : '#e67e22');
+                                drawArrow(tutor.move.substring(0,2), tutor.move.substring(2,4), color, 0.8);
+                            }
                         });
-                    } else {
-                        $tutorPanel.append(`<div class="tutor-line"><span class="tutor-move">${data.move}</span> Idea: Standard Opening Book Move</div>`);
                     }
                 })
                 .catch(err => console.error("Tutor fetch error:", err));
         }
 
-        // --- TRIGGER ASSISTANCE BASED ON UI SELECTION ---
         function triggerAssistance() {
             var assistLevel = parseInt(document.getElementById('assistLevel').value);
             if (assistLevel === 1) getThreatDetection();
@@ -372,70 +490,28 @@
 
         $('#assistLevel').on('change', triggerAssistance);
 
-        // --- THE BOT'S TURN ---
         function makeEngineMove() {
             if (game.game_over()) return;
-
             $move.hide();
             $thinking.show();
-
-            var customDepth = parseInt(document.getElementById('depthInput').value) || 5;
+            var customDepth = parseInt(document.getElementById('depthInput').value) || 30;
             var currentElo = parseInt(document.getElementById('eloInput').value) || 2500;
-
-            console.log("--- REQUESTING BOT MOVE ---");
-            console.log(`Depth: ${customDepth}, Elo: ${currentElo}, Time Limit: 8000ms`);
-
             fetch('/get_move', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    fen: game.fen(),
-                    elo: currentElo, // Uses UI Elo!
-                    depth: customDepth,
-                    time_limit: 8000 // CHANGE THIS TO 1500 IF YOU WANT THE BOT TO MOVE FASTER
-                })
+                body: JSON.stringify({ fen: game.fen(), elo: currentElo, depth: customDepth, time_limit: 3000 })
             })
                 .then(response => response.json())
                 .then(data => {
-                    console.log("Bot API Response:", data);
-
                     $thinking.hide();
-                    var depthInfo = data.depth_reached ? (' [depth ' + data.depth_reached + ']') : '';
-                    $move.html('Engine responds ' + data.move + ' (' + data.time + 's)' + depthInfo);
-                    $move.show();
-
+                    $move.html('Engine responds ' + data.move + ' (' + data.time + 's)').show();
                     game.move(data.move, { sloppy: true });
                     board.position(game.fen());
                     updateStatus();
-
-                    // Use the engine's pre-computed user-perspective top replies
-                    // if available — saves a separate 3s /get_move round-trip for
-                    // Level 2 tutor hints. The supplementary search inside the C++
-                    // engine ran on this exact resulting position, so the moves
-                    // are guaranteed legal here.
-                    var assistLevel = parseInt(document.getElementById('assistLevel').value);
-                    if (assistLevel === 2 && data.user_top_3 && data.user_top_3.length > 0) {
-                        $tutorPanel.removeClass('threat-alert').show();
-                        $tutorPanel.empty();
-                        $tutorPanel.append('<strong>Tutor Ideas (Your best moves):</strong><br>');
-                        data.user_top_3.forEach(tutor => {
-                            $tutorPanel.append(`
-                            <div class="tutor-line" style="margin-bottom: 8px;">
-                                <span class="tutor-move">${tutor.move}</span>
-                                <span style="color: #4CAF50; font-weight: bold;">${tutor.tactics || "Solid Move"}</span><br>
-                                <span style="font-size: 12px; color: #aaa;">Predicted line: ${tutor.idea || "None"}</span>
-                            </div>
-                        `);
-                        });
-                    } else {
-                        triggerAssistance();
-                    }
+                    triggerAssistance();
+                    if (data.eval_pawns !== undefined) updateMaterialBar(data.eval_pawns);
                 })
-                .catch(err => {
-                    $thinking.hide();
-                    console.error("API Error:", err);
-                    alert("Could not connect to the engine.");
-                });
+                .catch(err => { $thinking.hide(); console.error("API Error:", err); });
         }
 
         var config = {
@@ -449,16 +525,250 @@
 
         board = Chessboard('myBoard', config);
         updateStatus();
-        // --- GLOBAL VARIABLES FOR REPLAY STATE ---
         window.analysisMoves = [];
-        window.currentMoveIndex = 0;
+        window.currentMoveIndex = -1;
+
+        function updateMaterialBar(eval_pawns, is_checkmate = false) {
+            var wPct = 50 + (eval_pawns * 4);
+            if (is_checkmate) wPct = eval_pawns > 0 ? 100 : 0;
+            else { if (wPct > 95) wPct = 95; if (wPct < 5) wPct = 5; }
+            $('#whiteMaterialBar').css('height', wPct + '%');
+        }
+
+        function drawArrow(fromSq, toSq, color, opacity=0.8) {
+            if (!fromSq || !toSq) return;
+            var files = {'a':0, 'b':1, 'c':2, 'd':3, 'e':4, 'f':5, 'g':6, 'h':7};
+            var isWhiteBottom = board.orientation() === 'white';
+            var f1 = files[fromSq[0]], r1 = parseInt(fromSq[1]) - 1;
+            var f2 = files[toSq[0]], r2 = parseInt(toSq[1]) - 1;
+            if (!isWhiteBottom) { f1 = 7 - f1; r1 = 7 - r1; f2 = 7 - f2; r2 = 7 - r2; }
+            var sqSize = $('#myBoard').width() / 8;
+            var x1 = f1 * sqSize + sqSize / 2, y1 = (7 - r1) * sqSize + sqSize / 2;
+            var x2 = f2 * sqSize + sqSize / 2, y2 = (7 - r2) * sqSize + sqSize / 2;
+            var svg = document.getElementById('arrowLayer');
+            var defs = svg.querySelector('defs') || svg.appendChild(document.createElementNS('http://www.w3.org/2000/svg', 'defs'));
+            var markerId = 'arrowhead-' + color.replace('#', '');
+            if (!document.getElementById(markerId)) {
+                var marker = document.createElementNS('http://www.w3.org/2000/svg', 'marker');
+                marker.setAttribute('id', markerId);
+                marker.setAttribute('markerWidth', '4'); marker.setAttribute('markerHeight', '4');
+                marker.setAttribute('refX', '2'); marker.setAttribute('refY', '1.5');
+                marker.setAttribute('orient', 'auto');
+                var path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+                path.setAttribute('d', 'M 0 0 L 3 1.5 L 0 3 L 1 1.5 z');
+                path.setAttribute('fill', color);
+                marker.appendChild(path); defs.appendChild(marker);
+            }
+            var dx = x2 - x1, dy = y2 - y1, len = Math.sqrt(dx*dx + dy*dy);
+            var shorten = sqSize * 0.45; var ratio = (len - shorten) / len;
+            var line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+            line.setAttribute('x1', x1); line.setAttribute('y1', y1);
+            line.setAttribute('x2', x1 + dx * ratio); line.setAttribute('y2', y1 + dy * ratio);
+            line.setAttribute('stroke', color); line.setAttribute('stroke-width', sqSize * 0.12);
+            line.setAttribute('opacity', opacity); line.setAttribute('marker-end', 'url(#' + markerId + ')');
+            svg.appendChild(line);
+        }
+
+        function goToMoveById(id) {
+            var idx = window.analysisMoves.findIndex(m => m.id === id);
+            if (idx !== -1) goToMove(idx);
+        }
+
+        function buildTree(moves) {
+            var root = { id: 'root', name: 'Start Position', children: [], move: null, type: 'root' };
+            var moveMap = { 'root': root };
+
+            moves.forEach(m => {
+                var type = 'MAINLINE';
+                var linkType = 'MAINLINE';
+                if (m.branchId !== 'main') {
+                    linkType = 'VARIATION';
+                }
+                
+                if (m.classification === 'Good' || m.classification === 'Best') type = 'Good';
+                else if (m.classification === 'Inaccuracy') type = 'Inaccuracy';
+                else if (m.classification === 'Mistake') type = 'Mistake';
+                else if (m.classification === 'Blunder') type = 'Blunder';
+                else if (m.classification === 'Book') type = 'Book';
+                else if (m.classification === 'Brilliant') type = 'Brilliant';
+
+                var node = {
+                    id: m.id,
+                    name: `${m.move_number}. ${m.color === 'White' ? '' : '... '}${m.san}`,
+                    move: m,
+                    type: type,
+                    linkType: linkType,
+                    children: []
+                };
+                moveMap[m.id] = node;
+                var parentNode = m.parentId ? moveMap[m.parentId] : root;
+                if (parentNode) {
+                    parentNode.children.push(node);
+                }
+            });
+            return root;
+        }
+
+        function renderTreeView() {
+            $('#treeContainer').empty();
+            var treeData = buildTree(window.analysisMoves);
+            
+            window.treeInstance = new CollapsibleTree({
+                width          : $('#treeContainer').width(),
+                height         : $('#treeContainer').height(),
+                fullwidth      : true,
+                appendSelector : '#treeContainer',
+                data           : treeData,
+                duration       : 400,
+                marginLeft     : 20,
+                marginRight    : 20,
+                marginTop      : 40,
+                marginBottom   : 40
+            });
+            window.treeInstance.render();
+            
+            // Add a class to treeContainer to scope styles if necessary
+            $('#treeContainer').addClass('d3');
+        }
+
+        function showStartPage() {
+            appMode = 'PLAY';
+            $('#startPage').show();
+            $('#appView').hide();
+            $('#importPage').hide();
+            $('#arrowLayer').empty();
+            game.reset();
+            board.start();
+            updateMaterialBar(0);
+            updateStatus();
+            $('#tutorPanel').hide();
+            $('#move').hide();
+            $('#analyzeBtn').hide();
+            $('#analysisView').hide();
+        }
+
+        function showPlayPage() { appMode = 'PLAY'; $('#startPage').hide(); $('#importPage').hide(); $('#appView').css('display', 'flex'); }
+        function showImportPage() { $('#startPage').hide(); $('#appView').hide(); $('#importPage').show(); $('#importText').val(''); }
+
+        function renderAnalysisDetails() {
+            var detailsHtml = "";
+            if (window.analysisMoves.length === 0) {
+                detailsHtml = '<div style="padding: 20px; color: #ccc; text-align: center;">No moves to analyze. This was a starting position.</div>';
+            } else {
+                window.analysisMoves.forEach((m, index) => {
+                    var color = "#2ecc71";
+                    if (m.classification === "Blunder") color = "#e74c3c";
+                    else if (m.classification === "Mistake") color = "#e67e22";
+                    else if (m.classification === "Inaccuracy") color = "#f1c40f";
+                    var explanationText = m.explanation || "Standard positional move.";
+                    var moveDepth = m.depth || 0;
+                    var borderStyle = moveDepth > 0 ? "dashed" : "solid";
+                    var marginLeft = (moveDepth * 20) + "px";
+                    var branchIndicator = moveDepth > 0 ? `<div style="position: absolute; left: 0; top: 0; bottom: 0; width: 4px; background: ${getBranchColor(m.branchId)};"></div>` : '';
+
+                    detailsHtml += `
+                <div id="card-${index}" class="analysis-card" onclick="goToMove(${index})" style="position: relative; margin-left: ${marginLeft}; background: #222; padding: 12px 12px 12px 16px; border-left: 4px ${borderStyle} ${color}; margin-bottom: 10px; border-radius: 4px; overflow: hidden;">
+                    ${branchIndicator}
+                    <strong style="color: white;">Move ${m.move_number} (${m.color}): ${m.san}</strong>
+                    <span style="float: right; color: ${color}; font-weight: bold; font-size: 12px; text-transform: uppercase;">${m.classification}</span><br>
+                    <span style="font-size: 14px; color: #aaa; display: block; margin-top: 5px; line-height: 1.4;">${explanationText}</span>
+                </div>
+            `;
+                });
+            }
+            $('#analysisDetails').html(detailsHtml);
+            if (currentViewMode === 'TREE') renderTreeView();
+        }
+
+        function exploreCustomMove(oldFen, moveObj, fromSq, toSq) {
+            var san = moveObj.san;
+            
+            var newIndex = window.currentMoveIndex + 1;
+            if (newIndex > window.analysisMoves.length) {
+                newIndex = window.analysisMoves.length;
+            }
+            var parentMove = newIndex > 0 ? window.analysisMoves[newIndex - 1] : null;
+            var parentId = parentMove ? parentMove.id : null;
+            
+            var existingIndex = window.analysisMoves.findIndex(am => am.parentId === parentId && am.san === san);
+            if (existingIndex !== -1) {
+                goToMove(existingIndex);
+                if (currentViewMode === 'TREE') renderTreeView();
+                return;
+            }
+
+            var tempId = 'temp-' + Date.now();
+            $('#analysisDetails').prepend(`
+                <div id="${tempId}" class="analysis-card temp-card active-card" style="margin-left: 20px; background: #222; padding: 12px; border-left: 4px dashed #888; margin-bottom: 10px; border-radius: 4px;">
+                    <strong style="color: white;">Exploration: ${moveObj.san}</strong>
+                    <span id="${tempId}-status" style="float: right; color: #888; font-weight: bold; font-size: 12px; text-transform: uppercase;">Evaluating...</span><br>
+                </div>
+            `);
+            
+            $('.analysis-card').not('.temp-card').removeClass('active-card');
+            $('#arrowLayer').empty();
+            
+            fetch('/explore_move', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ fen: oldFen, move: fromSq + toSq })
+            })
+            .then(r => r.json())
+            .then(data => {
+                $('.temp-card').remove();
+                
+                // Splice the new move into the timeline instead of deleting the rest!
+                var newIndex = window.currentMoveIndex + 1;
+                if (newIndex > window.analysisMoves.length) {
+                    newIndex = window.analysisMoves.length;
+                }
+                var parentMove = newIndex > 0 ? window.analysisMoves[newIndex - 1] : null;
+                var parentId = parentMove ? parentMove.id : null;
+                
+                var nextMove = window.analysisMoves[newIndex];
+                
+                var newDepth = parentMove ? (parentMove.depth || 0) : 0;
+                var branchId = parentMove ? (parentMove.branchId || 'main') : 'main';
+
+                if (nextMove && nextMove.parentId === parentId) {
+                    newDepth = newDepth + 1;
+                    branchId = 'b_' + Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
+                }
+                
+                var newId = 'm_' + Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
+
+                // Construct the new move object
+                var newMove = {
+                    move_index: newIndex,
+                    move_number: Math.floor(newIndex / 2) + 1,
+                    color: game.turn() === 'b' ? 'White' : 'Black',
+                    san: data.san,
+                    from_sq: fromSq,
+                    to_sq: toSq,
+                    fen_after: data.fen_after,
+                    eval_pawns: data.eval_pawns,
+                    classification: data.classification,
+                    best_move: data.best_reply,
+                    explanation: data.is_checkmate ? "Checkmate!" : "Custom variation line.",
+                    is_checkmate: data.is_checkmate,
+                    depth: newDepth,
+                    id: newId,
+                    parentId: parentId,
+                    branchId: branchId
+                };
+                
+                window.analysisMoves.splice(newIndex, 0, newMove);
+                renderAnalysisDetails();
+                goToMove(newIndex);
+            })
+            .catch(err => console.error(err));
+        }
 
         // --- POST-GAME ANALYSIS LOGIC ---
-        $('#analyzeBtn').on('click', function () {
-            var pgnData = game.pgn();
-            if (!pgnData) return alert("No moves to analyze!");
-
-            $(this).text("🧠 Analyzing...").prop("disabled", true).css("opacity", "0.7");
+        function runAnalysis(pgnData, buttonElem) {
+            appMode = 'ANALYSIS';
+            var origText = $(buttonElem).text();
+            $(buttonElem).text("🧠 Analyzing...").prop("disabled", true).css("opacity", "0.7");
 
             fetch('/analyze', {
                 method: 'POST',
@@ -467,6 +777,11 @@
             })
                 .then(response => response.json())
                 .then(data => {
+                    $(buttonElem).text(origText).prop("disabled", false).css("opacity", "1");
+                    
+                    // Route to analysis view
+                    $('#importPage').hide();
+                    $('#appView').css('display', 'flex');
                     $('.controls, .status-box').hide();
                     $('#analysisView').show();
 
@@ -484,89 +799,167 @@
             `);
 
                     // Store moves globally for keyboard navigation
-                    window.analysisMoves = data.moves;
-                    var detailsHtml = '';
-
-                    // Render ALL moves, not just mistakes
-                    window.analysisMoves.forEach((m, index) => {
-                        var color = "#2ecc71"; // Default Good (Green)
-                        if (m.classification === "Blunder") color = "#e74c3c";
-                        else if (m.classification === "Mistake") color = "#e67e22";
-                        else if (m.classification === "Inaccuracy") color = "#f1c40f";
-
-                        var explanationText = m.explanation ? m.explanation : "Standard positional move.";
-
-                        detailsHtml += `
-                    <div id="card-${index}" class="analysis-card" onclick="goToMove(${index})" style="background: #222; padding: 12px; border-left: 4px solid ${color}; margin-bottom: 10px; border-radius: 4px;">
-                        <strong style="color: white;">Move ${m.move_number} (${m.color}): ${m.san}</strong>
-                        <span style="float: right; color: ${color}; font-weight: bold; font-size: 12px; text-transform: uppercase;">${m.classification}</span><br>
-                        <span style="font-size: 14px; color: #aaa; display: block; margin-top: 5px; line-height: 1.4;">${explanationText}</span>
-                    </div>
-                `;
+                    // Initialize depth to 0 for the main line
+                    data.moves.forEach((m, i) => {
+                        m.depth = 0;
+                        m.id = 'm_' + i;
+                        m.parentId = (i > 0) ? ('m_' + (i - 1)) : null;
+                        m.branchId = 'main';
                     });
+                    window.analysisMoves = data.moves;
 
-                    $('#analysisDetails').html(detailsHtml);
+                    if (window.analysisMoves.length === 0) {
+                        $('#analysisDetails').html('<div style="padding: 20px; color: #ccc; text-align: center;">No moves to analyze. This was a starting position.</div>');
+                        board.position(pgnData.replace(/\[.*?\]\s*/g, '').trim() || "start");
+                        updateMaterialBar(data.summary.final_eval_cp / 100);
+                        window.currentMoveIndex = -1;
+                    } else {
+                        renderAnalysisDetails();
+                    }
 
-                    // Auto-start at the very first move
-                    setTimeout(() => { goToMove(0); }, 100);
+                    if (window.analysisMoves.length > 0) {
+                        setTimeout(() => { goToMove(0); }, 100);
+                    }
                 })
                 .catch(err => {
                     console.error("Analysis failed:", err);
-                    $('#analyzeBtn').text("🔍 Analyze Game").prop("disabled", false).css("opacity", "1");
+                    $(buttonElem).text(origText).prop("disabled", false).css("opacity", "1");
+                    alert("Analysis failed. Please check the console or ensure your input is valid.");
                 });
+        }
+
+        // Hook up Play Page Analyze Button
+        $('#analyzeBtn').on('click', function () {
+            var pgnData = game.pgn();
+            if (!pgnData) return alert("No moves to analyze!");
+            runAnalysis(pgnData, this);
+        });
+
+        // Hook up Import Page Analyze Button
+        $('#importAnalyzeBtn').on('click', function () {
+            var textData = $('#importText').val().trim();
+            if (!textData) return alert("Please paste PGN or FEN.");
+            runAnalysis(textData, this);
         });
 
         // --- NAVIGATION & HIGHLIGHTING ENGINE ---
-        window.goToMove = function (index) {
-            if (index < 0 || index >= window.analysisMoves.length) return; // Prevent going out of bounds
+        function goToMove(index) {
+            $('.analysis-card').removeClass('active-card');
+            $('#card-' + index).addClass('active-card');
+            $('.temp-card').remove(); // Clear interactive exploration
 
             window.currentMoveIndex = index;
+            
+            if (index === -1) {
+                if (currentViewMode === 'TREE') {
+                    $('.node').removeClass('active-tree-node');
+                    $('#tree-node-root').addClass('active-tree-node');
+                    if (window.treeInstance) {
+                        window.treeInstance.focusNode('root');
+                    }
+                }
+                var startFen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+                if (window.analysisMoves && window.analysisMoves.length > 0 && window.analysisMoves[0].fen_before) {
+                    startFen = window.analysisMoves[0].fen_before;
+                }
+                board.position(startFen);
+                game.load(startFen);
+                updateMaterialBar(0, false);
+                $('#arrowLayer').empty();
+                $('#myBoard .square-55d63').removeClass('highlight-move highlight-blunder highlight-mistake highlight-inaccuracy highlight-good');
+                
+                var container = $('#analysisDetails');
+                container.stop(true, true).animate({ scrollTop: 0 }, 100);
+                return;
+            }
+
             var m = window.analysisMoves[index];
+            if (!m) return;
+            
+            if (currentViewMode === 'TREE') {
+                $('.node').removeClass('active-tree-node');
+                $('#tree-node-' + m.id).addClass('active-tree-node');
+                if (window.treeInstance) {
+                    window.treeInstance.focusNode(m.id);
+                }
+            }
 
-            // 1. Update the physical chessboard
             board.position(m.fen_after);
+            
+            // Sync internal game state so valid exploration moves can be generated
+            game.load(m.fen_after);
+            updateMaterialBar(m.eval_pawns, m.is_checkmate);
+            $('#arrowLayer').empty();
+
             $('#myBoard .square-55d63').removeClass('highlight-move highlight-blunder highlight-mistake highlight-inaccuracy highlight-good');
-            $('#myBoard .square-' + m.from_sq).addClass('highlight-move');
-            $('#myBoard .square-' + m.to_sq).addClass('highlight-move');
-            $('#myBoard .square-' + m.to_sq).addClass('highlight-' + m.classification.toLowerCase());
 
-            // 2. Manage the UI highlighting for the cards
-            $('.analysis-card').removeClass('active-card'); // Strip active class from all
-            $('#card-' + index).addClass('active-card');    // Add to current
+            var sqClass = 'highlight-good';
+            if (m.classification === "Blunder") sqClass = 'highlight-blunder';
+            else if (m.classification === "Mistake") sqClass = 'highlight-mistake';
+            else if (m.classification === "Inaccuracy") sqClass = 'highlight-inaccuracy';
+            else if (m.classification === "Brilliant") sqClass = 'highlight-good'; // or highlight-brilliant
 
-            // 3. Auto-scroll the list so the active card is always visible
-            document.getElementById('card-' + index).scrollIntoView({ behavior: 'smooth', block: 'center' });
-        };
+            $('#myBoard .square-' + m.from_sq).addClass('highlight-move ' + sqClass);
+            $('#myBoard .square-' + m.to_sq).addClass('highlight-move ' + sqClass);
+
+            // Draw SVG Arrows based on classification
+            if (m.classification === 'Blunder' || m.classification === 'Mistake') {
+                if (m.threat_move) drawArrow(m.threat_move.substring(0,2), m.threat_move.substring(2,4), '#e74c3c', 0.9); // Red threat
+                if (m.best_move) drawArrow(m.best_move.substring(0,2), m.best_move.substring(2,4), '#2ecc71', 0.9); // Green best
+            } 
+            else if (m.classification === 'Brilliant' || m.classification === 'Perfect') {
+                if (m.pv_sequence && m.pv_sequence.length > 0) {
+                    var opacities = [1.0, 0.7, 0.4, 0.2];
+                    m.pv_sequence.forEach((pvMove, idx) => {
+                        var op = opacities[Math.min(idx, 3)];
+                        var arrColor = (idx % 2 === 0) ? '#54a0ff' : '#e67e22'; // Blue for your move, Orange for opponent
+                        drawArrow(pvMove.substring(0,2), pvMove.substring(2,4), arrColor, op);
+                    });
+                }
+            }
+
+            // Scroll card into view
+            var container = $('#analysisDetails');
+            var card = $('#card-' + index);
+            if (card.length > 0) {
+                container.stop(true, true).animate({
+                    scrollTop: card.offset().top - container.offset().top + container.scrollTop() - 20
+                }, 100);
+            }
+        }
 
         // --- KEYBOARD CONTROLS ---
         document.addEventListener('keydown', function (e) {
-            // Only trigger arrow keys if the analysis view is currently open
             if ($('#analysisView').is(':visible')) {
+                var currentM = window.analysisMoves[window.currentMoveIndex];
+                
                 if (e.key === "ArrowRight" || e.key === "ArrowDown") {
-                    e.preventDefault(); // Stop the whole web page from scrolling down
-                    goToMove(window.currentMoveIndex + 1);
+                    e.preventDefault(); 
+                    if (currentM) {
+                        // Find the first child of the current move
+                        var childIndex = window.analysisMoves.findIndex(m => m.parentId === currentM.id);
+                        if (childIndex !== -1) {
+                            goToMove(childIndex);
+                        }
+                    } else if (window.currentMoveIndex === -1 && window.analysisMoves.length > 0) {
+                        // From starting position, go to first move
+                        goToMove(0);
+                    }
                 } else if (e.key === "ArrowLeft" || e.key === "ArrowUp") {
                     e.preventDefault();
-                    goToMove(window.currentMoveIndex - 1);
+                    if (currentM && currentM.parentId) {
+                        // Go to parent move
+                        var parentIndex = window.analysisMoves.findIndex(m => m.id === currentM.parentId);
+                        if (parentIndex !== -1) {
+                            goToMove(parentIndex);
+                        }
+                    } else if (currentM && !currentM.parentId) {
+                        // Go to starting position
+                        goToMove(-1);
+                    }
                 }
             }
         });
-
-        // --- VISUAL BOARD UPDATER ---
-        window.showPosition = function (fen, fromSq, toSq, classification) {
-            // 1. Update the pieces on the board
-            board.position(fen);
-
-            // 2. Clear all previous highlights
-            $('#myBoard .square-55d63').removeClass('highlight-move highlight-blunder highlight-mistake highlight-inaccuracy');
-
-            // 3. Highlight where the piece came from and went to (Yellow background)
-            $('#myBoard .square-' + fromSq).addClass('highlight-move');
-            $('#myBoard .square-' + toSq).addClass('highlight-move');
-
-            // 4. Add the severe colored ring to the destination square based on how bad the move was
-            $('#myBoard .square-' + toSq).addClass('highlight-' + classification.toLowerCase());
-        };
     </script>
 </body>
 
