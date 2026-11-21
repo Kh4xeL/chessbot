@@ -27,14 +27,14 @@ Full-strength Stockfish is still far ahead: even with 3 s per move against Stock
              └──────────────────────────────────────┬────────────────────────────────────┘
                                                     │ HTTP (JSON)
              ┌──────────────────────── python/api.py (FastAPI) ──────────────────────────┐
-             │  opening book · tactic annotations · threat detection (null move)        │
-             │  post-game analysis with Stockfish (semantic_analysis.py)                │
+             │  opening book · tactic annotations · threat detection (null move)         │
+             │  post-game analysis with Stockfish (semantic_analysis.py)                 │
              └──────────────────────────────────────┬────────────────────────────────────┘
                                                     │ stdin/stdout, a pool of long-lived processes
              ┌──────────────────────── engine (src/, C++17) ─────────────────────────────┐
              │  root:   CNN policy (policy_net.hpp) → move order, human-like choice      │
-             │  search: Lazy SMP, iterative deepening, PVS, TT, SEE, LMR, quiescence   │
-             │  leaves: NNUE (nnue.hpp), updated incrementally move by move             │
+             │  search: Lazy SMP, iterative deepening, PVS, TT, SEE, LMR, quiescence     │
+             │  leaves: NNUE (nnue.hpp), updated incrementally move by move              │
              └───────────────────────────────────────────────────────────────────────────┘
 ```
 
