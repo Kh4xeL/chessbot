@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 import atexit
+import queue
 import subprocess
 import threading
 import chess
@@ -130,7 +131,33 @@ class EngineProcess:
             self.proc = None
 
 
-ENGINE = EngineProcess(ENGINE_PATH)
+class EnginePool:
+    """A few engine processes so a tutor hint or threat check doesn't wait behind the
+    bot's 3 s move. Each request takes a free process; processes start on first use."""
+
+    def __init__(self, path, size):
+        self.engines = [EngineProcess(path) for _ in range(size)]
+        self.free = queue.Queue()
+        for e in self.engines:
+            self.free.put(e)
+
+    def go(self, fen, elo, depth, time_ms):
+        e = self.free.get()
+        try:
+            return e.go(fen, elo, depth, time_ms)
+        finally:
+            self.free.put(e)
+
+    def newgame(self):
+        for e in self.engines:
+            e.newgame()
+
+    def close(self):
+        for e in self.engines:
+            e.close()
+
+
+ENGINE = EnginePool(ENGINE_PATH, size=int(os.environ.get("ENGINE_PROCESSES", "3")))
 atexit.register(ENGINE.close)
 
 
@@ -505,13 +532,13 @@ class ExploreRequest(BaseModel):
 @app.post("/explore_move")
 def explore_move(request: ExploreRequest):
     import chess.engine
-    from .semantic_analysis import STOCKFISH_PATH, clamp, EVAL_CAP, classify_move
+    from .semantic_analysis import shared_stockfish, clamp, EVAL_CAP, classify_move
     
     try:
         board = chess.Board(request.fen)
         color = board.turn
         
-        with chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH) as engine:
+        with shared_stockfish() as engine:
             # Eval before
             info_before = engine.analyse(board, chess.engine.Limit(time=0.05))
             prev_score = clamp(info_before["score"].white().score(mate_score=10000), -EVAL_CAP, EVAL_CAP)
