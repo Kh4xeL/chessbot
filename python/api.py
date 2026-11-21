@@ -67,6 +67,9 @@ def _find_engine():
 
 ENGINE_PATH = _find_engine()
 FULL_STRENGTH = 3000
+# 3 processes x 4 search threads (Lazy SMP: ~+160 Elo over 1 thread at 0.2 s/move).
+ENGINE_PROCESSES = int(os.environ.get("ENGINE_PROCESSES", "3"))
+ENGINE_THREADS = int(os.environ.get("ENGINE_THREADS", "4"))
 
 
 class EngineProcess:
@@ -81,7 +84,7 @@ class EngineProcess:
 
     def _start(self):
         self.proc = subprocess.Popen(
-            [self.path, "--server"], cwd=PROJECT_ROOT, text=True, bufsize=1,
+            [self.path, "--server", "--threads", str(ENGINE_THREADS)], cwd=PROJECT_ROOT, text=True, bufsize=1,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=None)
         line = self.proc.stdout.readline().strip()
         if line != "READY":
@@ -157,7 +160,7 @@ class EnginePool:
             e.close()
 
 
-ENGINE = EnginePool(ENGINE_PATH, size=int(os.environ.get("ENGINE_PROCESSES", "3")))
+ENGINE = EnginePool(ENGINE_PATH, size=ENGINE_PROCESSES)
 atexit.register(ENGINE.close)
 
 
