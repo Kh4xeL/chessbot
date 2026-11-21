@@ -88,22 +88,6 @@ def rule_based_explanation(board_before, move, color, best_move=None, delta_cp=0
     Attempt to explain a bad move using a priority-ordered set of chess rules.
     Returns a plain-English string. Never returns None — always falls back
     to a generic description so no move is left unexplained.
-
-    Rules checked (priority order):
-      1.  Missed checkmate
-      2.  Delivered checkmate (own move was actually good — flag mislabel)
-      3.  Walked into checkmate
-      4.  Check delivered
-      5.  Unfavorable capture (loses material)
-      6.  Hanging piece — moved away from defence
-      7.  Piece left en prise after move
-      8.  Fork created against the player
-      9.  Pin created against the player
-      10. Discovered attack against the player
-      11. Back-rank weakness exploited
-      12. King safety — castling rights lost unnecessarily
-      13. Generic material drop fallback
-      14. Positional fallback
     """
     board_after = board_before.copy()
     board_after.push(move)
@@ -112,7 +96,6 @@ def rule_based_explanation(board_before, move, color, best_move=None, delta_cp=0
     move_san = board_before.san(move)
 
     # ── Rule 1: Missed checkmate ─────────────────────────────────────
-    # Check if the best move (from engine) delivers mate while this move doesn't
     if best_move and best_move != move:
         test = board_before.copy()
         test.push(best_move)
@@ -125,11 +108,13 @@ def rule_based_explanation(board_before, move, color, best_move=None, delta_cp=0
     if board_after.is_checkmate():
         return f"{mover} delivers checkmate with {move_san}."
 
-    # ── Rule 3: Walked into checkmate ────────────────────────────────
-    if board_after.is_check():
-        # Count legal moves for the side in check
-        if board_after.is_checkmate():
-            return f"{mover} plays {move_san}, but this results in checkmate."
+    # ── Rule 3: Allowed Checkmate (Blundered Mate in 1) ──────────────
+    for opp_move in board_after.legal_moves:
+        test = board_after.copy()
+        test.push(opp_move)
+        if test.is_checkmate():
+            return (f"After {move_san}, the opponent can play {board_after.san(opp_move)} "
+                    f"and deliver checkmate.")
 
     # ── Rule 4: Delivered check ──────────────────────────────────────
     if board_after.is_check():
@@ -144,7 +129,6 @@ def rule_based_explanation(board_before, move, color, best_move=None, delta_cp=0
             move_val = PIECE_VALUES[moving_pt]
             cap_name  = PIECE_NAMES[captured_pt]
             move_name = PIECE_NAMES[moving_pt]
-            # Is the landing square defended by opponent?
             if board_after.is_attacked_by(opponent, move.to_square):
                 if move_val > cap_val:
                     loss = move_val - cap_val
@@ -159,7 +143,6 @@ def rule_based_explanation(board_before, move, color, best_move=None, delta_cp=0
     # ── Rule 6: Moving piece was defending another piece ─────────────
     from_sq = move.from_square
     to_sq   = move.to_square
-    # Find pieces that were defended by the moving piece before the move
     moving_pt = board_before.piece_type_at(from_sq)
     if moving_pt:
         previously_defended = []
@@ -167,13 +150,13 @@ def rule_based_explanation(board_before, move, color, best_move=None, delta_cp=0
             piece = board_before.piece_at(sq_idx)
             if (piece and piece.color == color and sq_idx != from_sq
                     and from_sq in board_before.attackers(color, sq_idx)):
-                # Was this square still defended after the move?
                 if not board_after.is_attacked_by(color, sq_idx):
-                    pt = piece.piece_type
-                    if pt >= chess.ROOK:  # Only flag if valuable piece left undefended
+                    if board_after.is_attacked_by(opponent, sq_idx):
+                        pt = piece.piece_type
                         previously_defended.append((sq_idx, pt))
 
         if previously_defended:
+            previously_defended.sort(key=lambda x: PIECE_VALUES[x[1]], reverse=True)
             sq_idx, pt = previously_defended[0]
             return (f"{mover} moves {PIECE_NAMES[moving_pt]} away from "
                     f"{sq(from_sq)}, leaving the {PIECE_NAMES[pt]} on "
@@ -183,30 +166,48 @@ def rule_based_explanation(board_before, move, color, best_move=None, delta_cp=0
     landed_pt = board_after.piece_type_at(to_sq)
     if landed_pt and landed_pt != chess.KING:
         landed_val = PIECE_VALUES[landed_pt]
-        if (board_after.is_attacked_by(opponent, to_sq)
-                and not board_after.is_attacked_by(color, to_sq)
-                and landed_val >= PIECE_VALUES[chess.KNIGHT]):
-            return (f"{mover} moves {PIECE_NAMES[landed_pt]} to {sq(to_sq)}, "
-                    f"leaving it completely undefended — "
-                    f"the opponent can capture it for free.")
+        attackers = list(board_after.attackers(opponent, to_sq))
+        if attackers:
+            min_attacker_val = min(PIECE_VALUES[board_after.piece_type_at(a)] for a in attackers)
+            is_defended = board_after.is_attacked_by(color, to_sq)
+            
+            if not is_defended:
+                return (f"{mover} moves {PIECE_NAMES[landed_pt]} to {sq(to_sq)}, "
+                        f"leaving it completely undefended — "
+                        f"the opponent can capture it for free.")
+            elif min_attacker_val < landed_val:
+                best_attacker_pt = min([board_after.piece_type_at(a) for a in attackers], key=lambda x: PIECE_VALUES[x])
+                return (f"{mover} moves {PIECE_NAMES[landed_pt]} to {sq(to_sq)}, "
+                        f"where it can be captured by a lesser piece "
+                        f"({PIECE_NAMES[best_attacker_pt]}).")
 
     # ── Rule 8: Opponent fork after this move ────────────────────────
-    # Check if opponent now has a move that attacks 2+ valuable pieces
     for opp_move in board_after.legal_moves:
         test = board_after.copy()
         test.push(opp_move)
+        attacker_sq = opp_move.to_square
+        attacker_pt = test.piece_type_at(attacker_sq)
+        if not attacker_pt: continue
+        
         attacked_valuable = []
         for sq_idx in chess.SQUARES:
             piece = test.piece_at(sq_idx)
-            if (piece and piece.color == color
-                    and piece.piece_type >= chess.KNIGHT
-                    and test.is_attacked_by(opponent, sq_idx)):
-                attacked_valuable.append(PIECE_NAMES[piece.piece_type])
+            if piece and piece.color == color and piece.piece_type >= chess.KNIGHT:
+                if attacker_sq in test.attackers(opponent, sq_idx):
+                    is_defended = test.is_attacked_by(color, sq_idx)
+                    favorable = PIECE_VALUES[attacker_pt] < PIECE_VALUES[piece.piece_type]
+                    if piece.piece_type == chess.KING or not is_defended or favorable:
+                        attacked_valuable.append(PIECE_NAMES[piece.piece_type])
+        
         if len(attacked_valuable) >= 2:
             fork_move_san = board_after.san(opp_move)
-            targets = " and ".join(set(attacked_valuable[:2]))
+            targets = list(set(attacked_valuable))
+            if len(targets) == 1:
+                target_str = f"two {targets[0]}s"
+            else:
+                target_str = " and ".join(targets[:2])
             return (f"After {move_san}, the opponent can play {fork_move_san} "
-                    f"forking {mover}'s {targets} simultaneously.")
+                    f"forking {mover}'s {target_str} simultaneously.")
 
     # ── Rule 9: Pin created against the player ───────────────────────
     for opp_move in board_after.legal_moves:
@@ -214,11 +215,9 @@ def rule_based_explanation(board_before, move, color, best_move=None, delta_cp=0
         opp_pt = board_after.piece_type_at(opp_move.from_square)
         if opp_pt in (chess.BISHOP, chess.ROOK, chess.QUEEN):
             test.push(opp_move)
-            # Look for pinned pieces (pieces that can't move without exposing king)
             for sq_idx in chess.SQUARES:
                 piece = test.piece_at(sq_idx)
                 if piece and piece.color == color and piece.piece_type != chess.KING:
-                    # Try moving the piece — if it exposes king, it's pinned
                     for friendly_move in list(test.legal_moves):
                         if friendly_move.from_square == sq_idx:
                             break
@@ -230,27 +229,13 @@ def rule_based_explanation(board_before, move, color, best_move=None, delta_cp=0
                                     f"{mover}'s {PIECE_NAMES[piece.piece_type]} "
                                     f"on {sq(sq_idx)} with {pin_san}.")
 
-    # ── Rule 10: Back-rank threat ─────────────────────────────────────
-    back_rank = chess.BB_RANK_1 if color == chess.WHITE else chess.BB_RANK_8
-    king_sq   = board_after.king(color)
-    if king_sq and chess.BB_SQUARES[king_sq] & back_rank:
-        # Count escape squares for the king
-        king_moves = [m for m in board_after.legal_moves
-                      if m.from_square == king_sq]
-        if len(king_moves) == 0:
-            rooks_queens = (board_after.pieces(chess.ROOK,   opponent)
-                          | board_after.pieces(chess.QUEEN,  opponent))
-            if rooks_queens:
-                return (f"{mover}'s King is trapped on the back rank after "
-                        f"{move_san} — vulnerable to a back-rank checkmate.")
-
-    # ── Rule 11: King safety — moved toward center in opening ────────
-    if moving_pt == chess.KING and get_game_phase(
+    # ── Rule 10: King safety — moved toward center in opening ────────
+    if moving_pt == chess.KING and not board_before.is_castling(move) and get_game_phase(
             board_before.fullmove_number, 40) != "Endgame":
         return (f"{mover} moves the King with {move_san} during the middlegame, "
                 f"exposing it to attacks and losing castling safety.")
 
-    # ── Rule 12: Generic material drop ───────────────────────────────
+    # ── Rule 11: Generic material drop ───────────────────────────────
     mat_before = material_count(board_before, color)
     mat_after  = material_count(board_after,  color)
     lost = mat_before - mat_after
@@ -258,7 +243,7 @@ def rule_based_explanation(board_before, move, color, best_move=None, delta_cp=0
         return (f"{mover} loses approximately {lost}cp of material "
                 f"as a result of {move_san}.")
 
-    # ── Rule 13: Positional fallback ─────────────────────────────────
+    # ── Rule 12: Positional fallback ─────────────────────────────────
     drop_pawns = round(delta_cp / 100, 1)
     return (f"{mover} plays {move_san}, causing a positional deterioration "
             f"of {drop_pawns} pawns. The evaluation drops significantly "
@@ -281,9 +266,9 @@ def analyze_pgn(pgn_string):
 
     with chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH) as engine:
 
-        info          = engine.analyse(board, chess.engine.Limit(time=ANALYSIS_TIME))
-        prev_score_cp = clamp(
-            info["score"].white().score(mate_score=10000), -EVAL_CAP, EVAL_CAP)
+        # Analyze the starting position to get the very first prev_score_cp
+        start_info = engine.analyse(board, chess.engine.Limit(time=ANALYSIS_TIME))
+        prev_score_cp = clamp(start_info["score"].white().score(mate_score=10000), -EVAL_CAP, EVAL_CAP)
 
         for i, node in enumerate(move_nodes):
             move        = node.move
@@ -295,54 +280,115 @@ def analyze_pgn(pgn_string):
             board_before = board.copy()
             board.push(move)
 
-            info          = engine.analyse(board, chess.engine.Limit(time=ANALYSIS_TIME))
+            # Evaluate board AFTER the move
+            info_after = engine.analyse(board, chess.engine.Limit(time=ANALYSIS_TIME))
             curr_score_cp = clamp(
-                info["score"].white().score(mate_score=10000), -EVAL_CAP, EVAL_CAP)
+                info_after["score"].white().score(mate_score=10000), -EVAL_CAP, EVAL_CAP)
+
+            # Evaluate board BEFORE the move with multipv=2 to find Perfect/Brilliant and missed mates
+            info_before = engine.analyse(
+                board_before,
+                chess.engine.Limit(time=ANALYSIS_TIME),
+                multipv=2
+            )
+            if isinstance(info_before, dict):
+                info_before = [info_before]
+                
+            best_move = info_before[0].get("pv", [None])[0] if "pv" in info_before[0] else None
+            best_move_uci = best_move.uci() if best_move else None
+            
+            # Recalculate prev_score_cp precisely from the multipv analysis to ensure accurate delta
+            prev_score_cp = clamp(
+                info_before[0]["score"].white().score(mate_score=10000), -EVAL_CAP, EVAL_CAP)
 
             delta = (prev_score_cp - curr_score_cp
                      if color == chess.WHITE
                      else curr_score_cp - prev_score_cp)
 
             classification = classify_move(delta)
-            phase          = get_game_phase(move_number, total_moves // 2)
+            
+            # ── Advanced Move Classifications ────────────────────
+            pv_sequence = []
+            if classification == "Good":
+                # Check for Perfect (huge gap between best and 2nd best)
+                is_perfect = False
+                perfect_explanation = None
+                if len(info_before) > 1 and best_move == move:
+                    score1 = info_before[0]["score"].white().score(mate_score=10000)
+                    score2 = info_before[1]["score"].white().score(mate_score=10000)
+                    
+                    # Convert to side-to-move perspective
+                    stm_score1 = score1 if color == chess.WHITE else -score1
+                    stm_score2 = score2 if color == chess.WHITE else -score2
+                    gap = stm_score1 - stm_score2
+                    
+                    if gap > 250 and not board_before.is_capture(move):
+                        is_perfect = True
+                        if stm_score2 < 0 and stm_score1 > 0:
+                            perfect_explanation = "The only winning move!"
+                        elif stm_score2 < -100 and stm_score1 >= -50:
+                            perfect_explanation = "The only way to save the situation."
+                        else:
+                            perfect_explanation = "A brilliantly precise move, far better than alternatives."
+
+                # Check for Brilliant (sacrificed material but eval is good)
+                is_brilliant = False
+                mat_before = material_count(board_before, color)
+                mat_after  = material_count(board, color)
+                if mat_before - mat_after >= 300: # Sacrificed a minor piece or more
+                    is_brilliant = True
+
+                if is_brilliant:
+                    classification = "Brilliant"
+                elif is_perfect:
+                    classification = "Perfect"
+                    
+                if classification in ["Brilliant", "Perfect"]:
+                    if "pv" in info_before[0]:
+                        pv_sequence = [m.uci() for m in info_before[0]["pv"][:4]]
+
+            phase = get_game_phase(move_number, total_moves // 2)
 
             # ── Semantic layer ──────────────────────────────────
             explanation = None
-            if classification != "Good":
-                # Get engine's best move for this position (for missed-mate detection)
-                best_info = engine.analyse(
-                    board_before,
-                    chess.engine.Limit(time=ANALYSIS_TIME),
-                    multipv=1
-                )
-                best_move = (best_info.get("pv", [None])[0]
-                             if isinstance(best_info, dict)
-                             else None)
-
+            threat_move_uci = None
+            if board.is_checkmate():
+                classification = "Perfect"
+                explanation = "Checkmate!"
+            elif classification == "Perfect" and perfect_explanation:
+                explanation = perfect_explanation
+            elif classification not in ["Good", "Brilliant", "Perfect"]:
                 explanation = rule_based_explanation(
                     board_before, move, color, best_move, delta
                 )
+                if classification in ["Blunder", "Mistake"]:
+                    threat_move = info_after.get("pv", [None])[0]
+                    threat_move_uci = threat_move.uci() if threat_move else None
 
             results.append({
                 "move_index"    : i + 1,
                 "move_number"   : move_number,
                 "color"         : color_name,
                 "san"           : move_san,
-                "from_sq"       : chess.square_name(move.from_square), # NEW
-                "to_sq"         : chess.square_name(move.to_square),   # NEW
-                "fen_after"     : board.fen(),                         # NEW
+                "from_sq"       : chess.square_name(move.from_square),
+                "to_sq"         : chess.square_name(move.to_square),
+                "fen_after"     : board.fen(),
                 "eval_cp"       : curr_score_cp,
                 "eval_pawns"    : round(curr_score_cp / 100, 2),
                 "delta_cp"      : round(delta, 1),
                 "classification": classification,
                 "phase"         : phase,
                 "explanation"   : explanation,
+                "best_move"     : best_move_uci,
+                "threat_move"   : threat_move_uci,
+                "pv_sequence"   : pv_sequence,
+                "is_checkmate"  : board.is_checkmate()
             })
 
             prev_score_cp = curr_score_cp
 
     # ── Summary ─────────────────────────────────────────────────────
-    counts      = {"Blunder": 0, "Mistake": 0, "Inaccuracy": 0, "Good": 0}
+    counts      = {"Brilliant": 0, "Perfect": 0, "Blunder": 0, "Mistake": 0, "Inaccuracy": 0, "Good": 0}
     white_stats = {k: 0 for k in counts}
     black_stats = {k: 0 for k in counts}
 

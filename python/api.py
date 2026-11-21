@@ -8,6 +8,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 import subprocess
 import chess
 import chess.polyglot
@@ -35,7 +36,11 @@ class MoveRequest(BaseModel):
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
 HTML_PATH = os.path.join(PROJECT_ROOT, "web", "index.html")
+WEB_DIR = os.path.join(PROJECT_ROOT, "web")
 BOOK_PATH = os.path.join(PROJECT_ROOT, "assets", "book.bin")
+
+# Serve static files from the web directory
+app.mount("/web", StaticFiles(directory=WEB_DIR), name="web")
 ENGINE_PATH = os.path.join(PROJECT_ROOT, "build", "engine")
 
 PIECE_NAMES = {1: "Pawn", 2: "Knight", 3: "Bishop", 4: "Rook", 5: "Queen", 6: "King"}
@@ -150,6 +155,7 @@ def calculate_move(request: MoveRequest):
         calculation_time = round(end_time - start_time, 2)
 
         best_move = None
+        eval_score = 0.0
         depth_reached = 0
         top_moves = []
         user_top_moves = []
@@ -164,6 +170,11 @@ def calculate_move(request: MoveRequest):
             line = line.strip()
             if line.startswith("BEST_MOVE:"):
                 best_move = line.split(":")[1].strip()
+            elif line.startswith("EVAL:"):
+                try:
+                    eval_score = float(line.split(":")[1].strip())
+                except ValueError:
+                    eval_score = 0.0
             elif line.startswith("DEPTH_REACHED:"):
                 try:
                     depth_reached = int(line.split(":")[1].strip())
@@ -219,6 +230,7 @@ def calculate_move(request: MoveRequest):
                 "engine": "Hybrid AlphaZero C++",
                 "depth": request.depth,
                 "depth_reached": depth_reached,
+                "eval_pawns": eval_score,
                 "time": calculation_time,
                 "top_3": top_moves,
                 "user_top_3": user_top_3,
@@ -333,12 +345,12 @@ def check_threats(request: ThreatRequest):
             if not is_threat:
                 threat_msg = "Position seems stable. No immediate tactical threats detected."
 
-            return {"threat": threat_msg, "hint": hint_move_uci, "is_threat": is_threat}
+            return {"threat": threat_msg, "hint": hint_move_uci, "is_threat": is_threat, "threat_move": threat_move_uci}
 
-        return {"threat": "Position seems stable.", "hint": hint_move_uci, "is_threat": False}
+        return {"threat": "Position seems stable.", "hint": hint_move_uci, "is_threat": False, "threat_move": None}
 
     except subprocess.CalledProcessError:
-        return {"threat": "Could not analyze threats.", "hint": None, "is_threat": False}
+        return {"threat": "Could not analyze threats.", "hint": None, "is_threat": False, "threat_move": None}
 
 
 from .semantic_analysis import analyze_pgn as _analyze_pgn
@@ -350,6 +362,56 @@ class AnalyzeRequest(BaseModel):
 @app.post("/analyze")
 def analyze_game(request: AnalyzeRequest):
     try:
-        return _analyze_pgn(request.pgn)
+        pgn_data = request.pgn.strip()
+        # If it looks like a bare FEN string, wrap it in a PGN structure
+        if pgn_data.count('/') >= 7 and " " in pgn_data and not pgn_data.startswith("["):
+            pgn_data = f'[FEN "{pgn_data}"]\n\n'
+            
+        return _analyze_pgn(pgn_data)
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+class ExploreRequest(BaseModel):
+    fen: str
+    move: str
+
+@app.post("/explore_move")
+def explore_move(request: ExploreRequest):
+    import chess.engine
+    from .semantic_analysis import STOCKFISH_PATH, clamp, EVAL_CAP, classify_move
+    
+    try:
+        board = chess.Board(request.fen)
+        color = board.turn
+        
+        with chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH) as engine:
+            # Eval before
+            info_before = engine.analyse(board, chess.engine.Limit(time=0.05))
+            prev_score = clamp(info_before["score"].white().score(mate_score=10000), -EVAL_CAP, EVAL_CAP)
+            
+            # Push custom move
+            m = chess.Move.from_uci(request.move)
+            board.push(m)
+                
+            # Eval after
+            info_after = engine.analyse(board, chess.engine.Limit(time=0.05))
+            curr_score = clamp(info_after["score"].white().score(mate_score=10000), -EVAL_CAP, EVAL_CAP)
+            
+            delta = (prev_score - curr_score) if color == chess.WHITE else (curr_score - prev_score)
+            classification = classify_move(delta)
+            if board.is_checkmate():
+                classification = "Perfect"
+            
+            best_reply = info_after.get("pv", [None])[0]
+            best_reply_uci = best_reply.uci() if best_reply else None
+            
+            return {
+                "eval_pawns": round(curr_score / 100, 2),
+                "classification": classification,
+                "best_reply": best_reply_uci,
+                "fen_after": board.fen(),
+                "san": chess.Board(request.fen).san(m),
+                "is_checkmate": board.is_checkmate()
+            }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
