@@ -517,6 +517,7 @@ RootResult iterate(Search& T, Board board, std::vector<RootMove> rms, int max_de
         std::vector<RootMove> cur = rms;
         std::vector<int> exact_scores;  // sorted descending
         bool done = true;
+        size_t completed = 0;
 
         for (size_t i = 0; i < cur.size(); i++) {
             RootMove& rm = cur[i];
@@ -543,6 +544,7 @@ RootResult iterate(Search& T, Board board, std::vector<RootMove> rms, int max_de
             }
             T.unmake(board, rm.move);
             if (T.stop) { done = false; break; }
+            completed++;
 
             rm.score = s;
             rm.exact = alpha == -INF || s > alpha;
@@ -552,12 +554,22 @@ RootResult iterate(Search& T, Board board, std::vector<RootMove> rms, int max_de
                 exact_scores.insert(std::upper_bound(exact_scores.begin(), exact_scores.end(), s, std::greater<int>()), s);
             }
         }
-        if (!done) break;
-
-        std::stable_sort(cur.begin(), cur.end(), [](const RootMove& a, const RootMove& b) {
+        auto by_score = [](const RootMove& a, const RootMove& b) {
             if (a.exact != b.exact) return a.exact;
             return a.score > b.score;
-        });
+        };
+        if (!done) {
+            // Out of time mid-iteration. Once the previous top moves have been re-searched
+            // at the new depth their scores are trustworthy, so keep that partial result
+            // (it often catches a better move found late in the iteration).
+            if (T.is_main && completed >= static_cast<size_t>(K)) {
+                std::stable_sort(cur.begin(), cur.begin() + completed, by_score);
+                res.moves = cur;
+            }
+            break;
+        }
+
+        std::stable_sort(cur.begin(), cur.end(), by_score);
         rms = cur;
         res.moves = cur;
         res.depth = depth;
@@ -569,7 +581,8 @@ RootResult iterate(Search& T, Board board, std::vector<RootMove> rms, int max_de
         }
         if (!T.is_main) continue;
         if (std::abs(cur[0].score) >= MATE_BOUND && depth >= 4) break;     // forced mate found
-        if (res.ms * 2 > time_ms) break;   // the next iteration would very likely not finish
+        // Don't start an iteration that probably can't re-search the best move in time.
+        if (res.ms * 10 > time_ms * 6) break;
     }
     res.nodes = T.nodes;
     res.ms = T.elapsed_ms();
