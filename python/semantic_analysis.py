@@ -328,6 +328,9 @@ def analyze_pgn(pgn_string):
                 "move_number"   : move_number,
                 "color"         : color_name,
                 "san"           : move_san,
+                "from_sq"       : chess.square_name(move.from_square), # NEW
+                "to_sq"         : chess.square_name(move.to_square),   # NEW
+                "fen_after"     : board.fen(),                         # NEW
                 "eval_cp"       : curr_score_cp,
                 "eval_pawns"    : round(curr_score_cp / 100, 2),
                 "delta_cp"      : round(delta, 1),
