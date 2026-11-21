@@ -298,3 +298,17 @@ def check_threats(request: ThreatRequest):
 
     except subprocess.CalledProcessError:
         return {"threat": "Could not analyze threats.", "hint": None, "is_threat": False}
+
+
+from semantic_analysis import analyze_pgn as _analyze_pgn
+from pydantic import BaseModel
+
+class AnalyzeRequest(BaseModel):
+    pgn: str
+
+@app.post("/analyze")
+def analyze_game(request: AnalyzeRequest):
+    try:
+        return _analyze_pgn(request.pgn)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
