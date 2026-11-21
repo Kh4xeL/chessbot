@@ -9,10 +9,9 @@ Under the hood it pairs two networks, each where it works best:
 
 | | Before (CNN at every leaf) | Now (NNUE + CNN at the root) |
 |---|---|---|
-| Positions evaluated per second | ~700 | ~1,800,000 |
-| Depth in 1–2 s | 3–4 | 11–19 |
-| Strength vs Stockfish limited to 2400 Elo (0.3 s/move) | not measured | 80% (+16 =0 −4) |
-| Strength vs Stockfish limited to 2700 Elo (0.3 s/move) | not measured | 45% (+6 =6 −8) |
+| Positions evaluated per second | ~700 | ~1.8M per thread, ~7.6M with 4 threads |
+| Depth in 1–2 s | 3–4 | 14–20 |
+| Strength vs Stockfish's Elo limiter (1 thread, 0.3 s/move) | not measured | ~2860 |
 | Average centipawn loss, same 47 positions from a real game | 32 | 21 |
 | Runtime dependencies | LibTorch (~2 GB) | none (plain C++17) |
 
@@ -31,10 +30,10 @@ Full-strength Stockfish is still far ahead: even with 3 s per move against Stock
              │  opening book · tactic annotations · threat detection (null move)        │
              │  post-game analysis with Stockfish (semantic_analysis.py)                │
              └──────────────────────────────────────┬────────────────────────────────────┘
-                                                    │ stdin/stdout, one long-lived process
+                                                    │ stdin/stdout, a pool of long-lived processes
              ┌──────────────────────── engine (src/, C++17) ─────────────────────────────┐
              │  root:   CNN policy (policy_net.hpp) → move order, human-like choice      │
-             │  search: iterative deepening, PVS, TT, null move, LMR, quiescence        │
+             │  search: Lazy SMP, iterative deepening, PVS, TT, SEE, LMR, quiescence   │
              │  leaves: NNUE (nnue.hpp), updated incrementally move by move             │
              └───────────────────────────────────────────────────────────────────────────┘
 ```
@@ -47,17 +46,19 @@ Full-strength Stockfish is still far ahead: even with 3 s per move against Stock
 ### The CNN policy (`src/policy_net.hpp`)
 * **Model:** our original 4-block residual CNN (13×8×8 input), trained on human games. Only its policy head is used now.
 * **No LibTorch:** BatchNorm is folded into the convolutions and the forward pass is plain C++. It runs once per move in about 3 ms.
-* **Self-test:** `engine --selftest` checks its output against PyTorch.
+* **Self-test:** `engine --selftest` checks its output against PyTorch (also part of `engine --test`).
 
 ### The search (`src/main.cpp`)
-* **Core:** iterative deepening with Multi-PV at the root, so the tutor's top 3 moves have exact scores.
-* **Pruning:** principal variation search, a transposition table, null-move pruning, reverse futility pruning, late move reductions and late move pruning.
-* **Move ordering:** killer and history heuristics, plus check extensions.
-* **Quiescence search:** follows captures to the end with delta pruning.
+* **Core:** iterative deepening with Multi-PV at the root, so the tutor's top 3 moves have exact scores, plus aspiration windows.
+* **Threads:** Lazy SMP. Helper threads share a lock-free transposition table (`--threads N`). 4 threads gained about +160 Elo over 1.
+* **Pruning:** principal variation search, null-move pruning, reverse futility pruning, late move reductions, late move pruning and SEE pruning.
+* **Move ordering:** hash move, captures ranked by static exchange evaluation (SEE), then killer and history heuristics, plus check extensions.
+* **Quiescence search:** follows captures to the end, skipping losing ones (SEE) and hopeless ones (delta pruning).
+* **Game history:** the API sends the game's moves, so the search sees repetitions.
 * **Elo setting:**
   * At 2900 or above it plays at full strength.
   * Below that it caps the depth and picks among near-best moves. Each move is weighted by its score and by how natural the CNN thinks it is, so weaker settings play plausible human moves rather than random blunders.
-  * Set to 1500, it scored about 1410 against Stockfish limited to 1500.
+  * Calibrated against Stockfish's Elo limiter, 40 games per point: 1400 → ~1480, 1800 → ~1880, 2200 → ~2190, 2600 → ~2590. Below 1400 the setting is extrapolated, because Stockfish can't be limited that low.
 
 ---
 
@@ -73,28 +74,43 @@ You need a C++17 compiler and CMake, nothing else.
   cmake --build cmake-build-release
   ```
 
-The build uses `-march=native`, so build on the machine that will run it.
+By default the build is optimised for your own CPU (`-march=native`). For a binary you want to share, add `-DENGINE_NATIVE=OFF`: it then runs on any x86-64 CPU with AVX2, at about the same speed.
 
 ```bash
-cmake-build-release/engine --selftest     # CNN matches PyTorch, NNUE loads
-cmake-build-release/engine --bench 2000   # search speed on a few positions
+cmake-build-release/engine --test                  # all self-checks: NNUE, SEE, mates, repetition, CNN
+cmake-build-release/engine --bench 2000 --threads 4  # search speed on a few positions
 ```
 
 ### 2. Run the tutor
 ```bash
-pip install fastapi uvicorn chess matplotlib
+pip install -r requirements.txt
 uvicorn python.api:app
 ```
 
 Open <http://127.0.0.1:8000>.
-* The API finds the engine in `cmake-build-release/` or `build/`.
+* The API finds the engine in `cmake-build-release/` or `build/`. It runs `ENGINE_PROCESSES` (default 3) engines with `ENGINE_THREADS` (default 4) threads each, so hints and threat checks don't wait behind the bot's move.
 * Stockfish, used only for post-game analysis, is found through `STOCKFISH_PATH`, your `PATH`, `tools/` or Homebrew.
 
 ### 3. Use the engine directly (optional)
 ```bash
 engine "<fen>" [elo] [max_depth] [time_ms]   # one search, prints the result block
-engine --server                               # persistent: "go <elo> <depth> <ms> <fen>", "newgame", "quit"
+engine --server [--threads N]                 # persistent, see below
 ```
+
+In server mode the commands are:
+* `go <elo> <depth> <ms> <fen> [moves m1 m2 ...]`
+* `newgame`
+* `quit`
+
+Each `go` prints a block of `BEST_MOVE`, `EVAL`, `MATE`, `DEPTH_REACHED` and `RANK` lines, ending with `END`.
+
+### 4. Run the tests
+```bash
+cmake-build-release/engine --test
+pytest tests/
+```
+
+GitHub Actions runs both on every push to `main` and on every pull request (`.github/workflows/ci.yml`).
 
 ---
 
@@ -106,6 +122,7 @@ python training/prepare_data.py --max-lines 110000000   # streams the Lichess ev
 python training/train_nnue.py --epochs 15               # writes assets/nnue.bin
 python training/match.py --elo 2400 --games 40          # strength check vs limited Stockfish
 python training/match.py --elo 0 --ms 3000 --sf-ms 100  # vs full-strength Stockfish
+python training/match.py --opponent old/engine.exe --games 120 --ms 100   # A/B test two builds
 ```
 
 `training/export_policy.py` re-exports `assets/policy_cnn.bin` from `assets/traced_alphazero.pt`.
@@ -114,18 +131,19 @@ python training/match.py --elo 0 --ms 3000 --sf-ms 100  # vs full-strength Stock
 
 ## Project layout
 ```
-src/            engine: main.cpp (search + protocol), nnue.hpp, policy_net.hpp
+src/            engine: main.cpp (search + protocol), nnue.hpp, policy_net.hpp, tests.hpp
 include/        chess.hpp (move generation, by Disservin)
 python/         api.py (FastAPI bridge), semantic_analysis.py (post-game review)
 web/            index.html, tree.js / tree.css (analysis move tree)
 training/       prepare_data.py, train_nnue.py, export_policy.py, match.py
 assets/         nnue.bin, policy_cnn.bin (+ test vectors), traced_alphazero.pt, book.bin
+tests/          API tests (pytest)
 ```
 
 ## Known limitations
-* **No game history:** the engine only receives the current position, so it can't see repetitions from earlier in the game.
-* **Single-threaded search:** the API serializes requests to the one engine process.
-* **Rough Elo numbers:** they come from short matches against Stockfish's own Elo limiter, not from a rating list.
+* **Rough Elo numbers:** they come from short matches (±100 Elo) against Stockfish's own Elo limiter, not from a rating list.
+* **No endgame tablebases:** endgames are played by search alone.
+* **Human-like but not human:** the CNN that makes weaker settings human-like was trained on all ratings together, not per rating band.
 
 ## Credits
 * A university experiment in hybrid ML and classical game-playing systems.

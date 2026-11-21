@@ -269,7 +269,8 @@
                         style="width: 50px;"></label>
                 <label>AI Elo:
                     <input type="range" id="eloInput" min="800" max="3000" value="2500" step="100"
-                        oninput="document.getElementById('eloDisplay').innerText = this.value">
+                        title="2900+ = full strength"
+                        oninput="document.getElementById('eloDisplay').innerText = this.value >= 2900 ? 'Max' : this.value">
                     <span id="eloDisplay" style="color: #4CAF50;">2500</span>
                 </label>
                 <label>Tutor Assistance:
@@ -279,14 +280,17 @@
                         <option value="2">Level 2: Maximum (Top 3 & Ideas)</option>
                     </select>
                 </label>
-                <label><input type="checkbox" id="showEvalBar" checked onchange="document.getElementById('evalBarContainer').style.display = this.checked ? 'flex' : 'none'"> Eval Bar</label>
+                <label><input type="checkbox" id="showEvalBar" checked onchange="document.getElementById('evalBarWrap').style.display = this.checked ? 'flex' : 'none'"> Eval Bar</label>
                 <label><input type="checkbox" id="showArrows" checked onchange="if(!this.checked) document.getElementById('arrowLayer').innerHTML=''; else triggerAssistance()"> Arrows</label>
             </div>
 
             <div style="display: flex; gap: 10px; align-items: stretch; justify-content: center; width: 100%;">
-                <div id="evalBarContainer" style="width: 15px; background: #333; border-radius: 4px; display: flex; flex-direction: column-reverse; overflow: hidden; height: 500px;">
-                    <div id="whiteMaterialBar" style="background: white; width: 100%; height: 50%; transition: height 0.3s;"></div>
-                    <div id="blackMaterialBar" style="background: black; width: 100%; flex-grow: 1;"></div>
+                <div id="evalBarWrap" style="display: flex; flex-direction: column; align-items: center; gap: 4px;">
+                    <div id="evalLabel" style="font-size: 11px; font-weight: bold; color: #ccc; min-width: 34px; text-align: center;">0.0</div>
+                    <div id="evalBarContainer" style="width: 15px; background: #333; border-radius: 4px; display: flex; flex-direction: column-reverse; overflow: hidden; height: 480px;">
+                        <div id="whiteMaterialBar" style="background: white; width: 100%; height: 50%; transition: height 0.3s;"></div>
+                        <div id="blackMaterialBar" style="background: black; width: 100%; flex-grow: 1;"></div>
+                    </div>
                 </div>
                 
                 <div style="position: relative; width: 500px; margin: 0;">
@@ -454,7 +458,7 @@
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 // Tutor hints always come from the full-strength engine, whatever the bot's Elo.
-                body: JSON.stringify({ fen: game.fen(), elo: 3000, depth: 99, time_limit: 2000 })
+                body: JSON.stringify(Object.assign({ fen: game.fen(), elo: 3000, depth: 99, time_limit: 2000, use_book: false }, historyPayload()))
             })
                 .then(response => response.json())
                 .then(data => {
@@ -499,7 +503,7 @@
             fetch('/get_move', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ fen: game.fen(), elo: currentElo, depth: customDepth, time_limit: 3000 })
+                body: JSON.stringify(Object.assign({ fen: game.fen(), elo: currentElo, depth: customDepth, time_limit: 3000 }, historyPayload()))
             })
                 .then(response => response.json())
                 .then(data => {
@@ -509,7 +513,7 @@
                     board.position(game.fen());
                     updateStatus();
                     triggerAssistance();
-                    if (data.eval_pawns !== undefined) updateMaterialBar(data.eval_pawns);
+                    if (data.eval_pawns !== undefined) updateMaterialBar(data.eval_pawns, game.in_checkmate(), data.mate);
                 })
                 .catch(err => { $thinking.hide(); console.error("API Error:", err); });
         }
@@ -528,11 +532,24 @@
         window.analysisMoves = [];
         window.currentMoveIndex = -1;
 
-        function updateMaterialBar(eval_pawns, is_checkmate = false) {
+        // mate: mate in N moves from the engine (+ White mates, - Black mates), or null
+        function updateMaterialBar(eval_pawns, is_checkmate = false, mate = null) {
             var wPct = 50 + (eval_pawns * 4);
-            if (is_checkmate) wPct = eval_pawns > 0 ? 100 : 0;
+            var label = (eval_pawns > 0 ? '+' : '') + Number(eval_pawns).toFixed(1);
+            if (is_checkmate) { wPct = eval_pawns > 0 ? 100 : 0; label = '#'; }
+            else if (mate !== null && mate !== undefined) { wPct = mate > 0 ? 100 : 0; label = (mate > 0 ? 'M' : '-M') + Math.abs(mate); }
             else { if (wPct > 95) wPct = 95; if (wPct < 5) wPct = 5; }
             $('#whiteMaterialBar').css('height', wPct + '%');
+            $('#evalLabel').text(label);
+        }
+
+        // Start FEN + UCI moves of the current game, so the engine can see repetitions.
+        function historyPayload() {
+            var moves = game.history({ verbose: true }).map(m => m.from + m.to + (m.promotion || ''));
+            var start = new Chess();
+            start.load_pgn(game.pgn());
+            while (start.undo()) {}
+            return { start_fen: start.fen(), moves: moves };
         }
 
         function drawArrow(fromSq, toSq, color, opacity=0.8) {
@@ -647,7 +664,7 @@
             $('#analysisView').hide();
         }
 
-        function showPlayPage() { appMode = 'PLAY'; $('#startPage').hide(); $('#importPage').hide(); $('#appView').css('display', 'flex'); }
+        function showPlayPage() { fetch('/new_game', { method: 'POST' }).catch(() => {}); appMode = 'PLAY'; $('#startPage').hide(); $('#importPage').hide(); $('#appView').css('display', 'flex'); }
         function showImportPage() { $('#startPage').hide(); $('#appView').hide(); $('#importPage').show(); $('#importText').val(''); }
 
         function renderAnalysisDetails() {

@@ -7,14 +7,24 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
+# ON: optimise for this machine's CPU (fastest). OFF: portable build that runs on any
+# x86-64 CPU with AVX2 (Haswell / 2013+), e.g. for CI or sharing the binary.
+option(ENGINE_NATIVE "Optimise for the CPU that builds the engine" ON)
+
 # No LibTorch any more: the NNUE and the CNN policy are evaluated in plain C++.
 add_executable(engine src/main.cpp)
 
+find_package(Threads REQUIRED)
+target_link_libraries(engine PRIVATE Threads::Threads)
+
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    # -march=native: build on the machine that runs the engine (AVX2 matters a lot).
-    target_compile_options(engine PRIVATE -O3 -march=native -fno-math-errno)
+    target_compile_options(engine PRIVATE -O3 -fno-math-errno)
+    if(ENGINE_NATIVE)
+        target_compile_options(engine PRIVATE -march=native)
+    elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64")
+        target_compile_options(engine PRIVATE -march=x86-64-v3)
+    endif()
     if(MINGW)
-        # Self-contained .exe (no dependency on the MinGW runtime DLLs).
         # Bundle the runtime so engine.exe also runs outside CLion: static
         # libgcc/libstdc++, and copy the one remaining DLL (winpthread) next to it.
         target_link_options(engine PRIVATE -static-libgcc -static-libstdc++)

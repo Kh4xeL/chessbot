@@ -7,6 +7,9 @@ Dependencies:
     pip install chess stockfish matplotlib
 """
 
+import atexit
+import contextlib
+import threading
 import chess
 import chess.pgn
 import chess.engine
@@ -34,6 +37,37 @@ def _find_stockfish():
 
 
 STOCKFISH_PATH    = _find_stockfish()
+
+_SF = None
+_SF_LOCK = threading.Lock()
+
+
+@contextlib.contextmanager
+def shared_stockfish():
+    """One long-lived Stockfish shared by all requests; starting a process per request
+    cost more than the 0.05 s analyses themselves. Restarted if it dies."""
+    global _SF
+    with _SF_LOCK:
+        if _SF is None:
+            _SF = chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH)
+        try:
+            yield _SF
+        except (chess.engine.EngineError, chess.engine.EngineTerminatedError):
+            try:
+                _SF.quit()
+            except Exception:
+                pass
+            _SF = None
+            raise
+
+
+@atexit.register
+def _close_stockfish():
+    if _SF is not None:
+        try:
+            _SF.quit()
+        except Exception:
+            pass
 ANALYSIS_TIME     = 0.05
 EVAL_CAP          = 1000
 
@@ -277,7 +311,7 @@ def analyze_pgn(pgn_string):
     total_moves = len(move_nodes)
     results     = []
 
-    with chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH) as engine:
+    with shared_stockfish() as engine:
 
         # Analyze the starting position to get the very first prev_score_cp
         start_info = engine.analyse(board, chess.engine.Limit(time=ANALYSIS_TIME))

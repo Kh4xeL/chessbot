@@ -12,15 +12,18 @@
  * Usage:
  *   engine <fen> [elo] [max_depth] [time_ms]   one search, then exit
  *   engine --server                            read commands from stdin:
- *       go <elo> <max_depth> <time_ms> <fen>   prints the result block, then END
+ *       go <elo> <max_depth> <time_ms> <fen> [moves m1 m2 ...]   prints the result block, then END
  *       newgame                                clears the hash tables
  *       quit
  *   engine --selftest                          checks the CNN against PyTorch output
+ *   engine --test                              all engine self-checks (NNUE, SEE, mates, ...)
  *   engine --bench [ms]                        search speed on a few positions
+ *   --threads N                                (any mode) Lazy SMP search threads, default 1
  *
  * Output block (parsed by python/api.py):
  *   BEST_MOVE:e2e4
  *   EVAL:0.31                  (pawns, White's point of view)
+ *   MATE:3                     (only when a mate is found: mate in N, + = White mates)
  *   DEPTH_REACHED:14
  *   TUTOR_DATA:
  *   RANK:1|MOVE:e2e4|IDEA:e2e4 e7e5 g1f3 ...      (top 3 for the side to move)
@@ -35,9 +38,11 @@
 #include <cstdint>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <random>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "../include/chess.hpp"
@@ -61,16 +66,57 @@ constexpr int MAX_PLY = 128;
 // ---------------------------------------------------------------------------
 enum Bound : std::uint8_t { BOUND_NONE = 0, BOUND_UPPER = 1, BOUND_LOWER = 2, BOUND_EXACT = 3 };
 
-struct TTEntry {
-    std::uint64_t key = 0;
-    std::int16_t score = 0;
+// Shared by all search threads without locks: each slot stores the data word and
+// key ^ data, so a slot torn by two threads writing at once simply fails the key check.
+struct TTData {
+    int score = 0;
     std::uint16_t move = 0;
-    std::int8_t depth = -1;
-    std::uint8_t bound = BOUND_NONE;
+    int depth = -1;
+    Bound bound = BOUND_NONE;
 };
 
-constexpr size_t TT_SIZE = 1u << 22;   // 4M entries x 16 bytes = 64 MB
-std::vector<TTEntry> TT(TT_SIZE);
+struct TTSlot {
+    std::atomic<std::uint64_t> key_xor{0};
+    std::atomic<std::uint64_t> data{0};
+};
+
+constexpr size_t TT_SIZE = 1u << 22;   // 4M slots x 16 bytes = 64 MB
+std::vector<TTSlot> TT(TT_SIZE);
+
+inline std::uint64_t tt_pack(int score, std::uint16_t move, int depth, Bound bound) {
+    return static_cast<std::uint64_t>(static_cast<std::uint16_t>(static_cast<std::int16_t>(score))) |
+           (static_cast<std::uint64_t>(move) << 16) |
+           (static_cast<std::uint64_t>(static_cast<std::uint8_t>(static_cast<std::int8_t>(depth))) << 32) |
+           (static_cast<std::uint64_t>(bound) << 40);
+}
+
+inline bool tt_probe(std::uint64_t key, TTData& out) {
+    const TTSlot& slot = TT[key & (TT_SIZE - 1)];
+    const std::uint64_t d = slot.data.load(std::memory_order_relaxed);
+    if ((slot.key_xor.load(std::memory_order_relaxed) ^ d) != key) return false;
+    out.score = static_cast<std::int16_t>(d & 0xFFFF);
+    out.move = static_cast<std::uint16_t>((d >> 16) & 0xFFFF);
+    out.depth = static_cast<std::int8_t>((d >> 32) & 0xFF);
+    out.bound = static_cast<Bound>((d >> 40) & 0xFF);
+    return true;
+}
+
+inline void tt_store(std::uint64_t key, int score, std::uint16_t move, int depth, Bound bound) {
+    TTSlot& slot = TT[key & (TT_SIZE - 1)];
+    TTData old;
+    // Depth-preferred replacement, but exact scores and other positions always overwrite.
+    if (tt_probe(key, old) && depth < old.depth && bound != BOUND_EXACT) return;
+    const std::uint64_t d = tt_pack(score, move, depth, bound);
+    slot.data.store(d, std::memory_order_relaxed);
+    slot.key_xor.store(key ^ d, std::memory_order_relaxed);
+}
+
+void tt_clear() {
+    for (auto& slot : TT) {
+        slot.key_xor.store(0, std::memory_order_relaxed);
+        slot.data.store(0, std::memory_order_relaxed);
+    }
+}
 
 inline int score_to_tt(int s, int ply) {
     if (s >= MATE_BOUND) return s + ply;
@@ -86,10 +132,14 @@ inline int score_from_tt(int s, int ply) {
 // ---------------------------------------------------------------------------
 // Search state
 // ---------------------------------------------------------------------------
+// Set by the main thread when time is up; every search thread polls it.
+std::atomic<bool> g_stop{false};
+
 struct Search {
     nnue::Stack nn;
     std::uint64_t nodes = 0;
-    bool stop = false;
+    std::atomic<bool>& stop = g_stop;
+    bool is_main = true;      // only the main thread checks the clock
     std::chrono::steady_clock::time_point start;
     long long time_limit_ms = 1000;
 
@@ -111,7 +161,7 @@ struct Search {
     }
 
     void check_time() {
-        if ((nodes & 2047) == 0 && elapsed_ms() >= time_limit_ms) stop = true;
+        if (is_main && (nodes & 2047) == 0 && elapsed_ms() >= time_limit_ms) stop = true;
     }
 
     void make(Board& b, const Move& m) { nn.push(b, m); b.makeMove(m); }
@@ -123,6 +173,72 @@ struct Search {
         return v[static_cast<int>(pt)];
     }
 
+    // Static exchange evaluation: does the capture sequence on m's target square,
+    // with both sides always recapturing with their cheapest piece, gain at least
+    // `threshold` centipawns? (Pins are ignored, as in most engines.)
+    static bool see_ge(const Board& b, const Move& m, int threshold) {
+        if (m.typeOf() != Move::NORMAL) return 0 >= threshold;
+        using chess::PieceType;
+        const chess::Square to = m.to();
+        int swap = piece_value(b.at<PieceType>(to)) - threshold;
+        if (swap < 0) return false;
+        swap = piece_value(b.at<PieceType>(m.from())) - swap;
+        if (swap <= 0) return true;
+
+        const std::uint64_t pawns = b.pieces(PieceType::PAWN).getBits();
+        const std::uint64_t knights = b.pieces(PieceType::KNIGHT).getBits();
+        const std::uint64_t bishops = b.pieces(PieceType::BISHOP).getBits();
+        const std::uint64_t rooks = b.pieces(PieceType::ROOK).getBits();
+        const std::uint64_t queens = b.pieces(PieceType::QUEEN).getBits();
+        const std::uint64_t kings = b.pieces(PieceType::KING).getBits();
+        const std::uint64_t diag = bishops | queens, ortho = rooks | queens;
+
+        std::uint64_t occ = b.occ().getBits() ^ (1ULL << m.from().index()) ^ (1ULL << to.index());
+        std::uint64_t attackers =
+            (chess::attacks::pawn(chess::Color::BLACK, to).getBits() & pawns & b.us(chess::Color::WHITE).getBits()) |
+            (chess::attacks::pawn(chess::Color::WHITE, to).getBits() & pawns & b.us(chess::Color::BLACK).getBits()) |
+            (chess::attacks::knight(to).getBits() & knights) |
+            (chess::attacks::bishop(to, occ).getBits() & diag) |
+            (chess::attacks::rook(to, occ).getBits() & ortho) |
+            (chess::attacks::king(to).getBits() & kings);
+
+        chess::Color stm = b.sideToMove();
+        int res = 1;
+        while (true) {
+            stm = ~stm;
+            attackers &= occ;
+            const std::uint64_t mine = attackers & b.us(stm).getBits();
+            if (!mine) break;
+            res ^= 1;
+            std::uint64_t bb;
+            if ((bb = mine & pawns)) {
+                if ((swap = 100 - swap) < res) break;
+                occ ^= bb & (~bb + 1);
+                attackers |= chess::attacks::bishop(to, occ).getBits() & diag;
+            } else if ((bb = mine & knights)) {
+                if ((swap = 320 - swap) < res) break;
+                occ ^= bb & (~bb + 1);
+            } else if ((bb = mine & bishops)) {
+                if ((swap = 330 - swap) < res) break;
+                occ ^= bb & (~bb + 1);
+                attackers |= chess::attacks::bishop(to, occ).getBits() & diag;
+            } else if ((bb = mine & rooks)) {
+                if ((swap = 500 - swap) < res) break;
+                occ ^= bb & (~bb + 1);
+                attackers |= chess::attacks::rook(to, occ).getBits() & ortho;
+            } else if ((bb = mine & queens)) {
+                if ((swap = 900 - swap) < res) break;
+                occ ^= bb & (~bb + 1);
+                attackers |= (chess::attacks::bishop(to, occ).getBits() & diag) |
+                             (chess::attacks::rook(to, occ).getBits() & ortho);
+            } else {
+                // King "captures": only legal if the other side has no attackers left.
+                return (attackers & ~b.us(stm).getBits()) ? (res ^ 1) : res;
+            }
+        }
+        return res;
+    }
+
     int score_move(const Board& b, const Move& m, std::uint16_t tt_move, int ply) const {
         if (m.move() == tt_move) return 10'000'000;
         const bool promo = m.typeOf() == Move::PROMOTION;
@@ -130,7 +246,9 @@ struct Search {
             auto victim = m.typeOf() == Move::ENPASSANT ? chess::PieceType(chess::PieceType::PAWN)
                                                          : b.at<chess::PieceType>(m.to());
             auto attacker = b.at<chess::PieceType>(m.from());
-            return 1'000'000 + piece_value(victim) * 10 - static_cast<int>(attacker) + (promo ? 5000 : 0);
+            const int mvv_lva = piece_value(victim) * 10 - static_cast<int>(attacker) + (promo ? 5000 : 0);
+            // Captures that lose material (by SEE) go after the killers and good quiets.
+            return (see_ge(b, m, 0) ? 1'000'000 : -500'000) + mvv_lva;
         }
         if (promo) return m.promotionType() == chess::PieceType::QUEEN ? 950'000 : -100'000;
         if (ply < MAX_PLY) {
@@ -185,6 +303,8 @@ struct Search {
                 auto victim = m.typeOf() == Move::ENPASSANT ? chess::PieceType(chess::PieceType::PAWN)
                                                              : b.at<chess::PieceType>(m.to());
                 if (stand + piece_value(victim) + 200 < alpha) continue;
+                // Losing captures can't improve a quiet position.
+                if (!see_ge(b, m, 0)) continue;
             }
             make(b, m);
             int s = -qsearch(b, -beta, -alpha, ply + 1);
@@ -222,9 +342,9 @@ struct Search {
 
         const bool pv_node = beta - alpha > 1;
         const std::uint64_t key = b.zobrist();
-        TTEntry& tte = TT[key & (TT_SIZE - 1)];
+        TTData tte;
         std::uint16_t tt_move = 0;
-        if (tte.key == key) {
+        if (tt_probe(key, tte)) {
             tt_move = tte.move;
             if (!pv_node && tte.depth >= depth) {
                 int s = score_from_tt(tte.score, ply);
@@ -279,6 +399,11 @@ struct Search {
                 searched >= 4 + depth * depth * 2)
                 continue;
 
+            // SEE pruning: at shallow depth skip moves that lose too much material outright.
+            if (!pv_node && !in_check && searched > 0 && best > -MATE_BOUND && depth <= 6 &&
+                !see_ge(b, m, quiet ? -60 * depth : -100 * depth))
+                continue;
+
             make(b, m);
             const bool gives_check = b.inCheck();
             int s;
@@ -330,13 +455,7 @@ struct Search {
         }
 
         const Bound bound = best >= beta ? BOUND_LOWER : (best > orig_alpha ? BOUND_EXACT : BOUND_UPPER);
-        if (tte.key != key || depth >= tte.depth || bound == BOUND_EXACT) {
-            tte.key = key;
-            tte.score = static_cast<std::int16_t>(score_to_tt(best, ply));
-            tte.move = best_move.move();
-            tte.depth = static_cast<std::int8_t>(depth);
-            tte.bound = bound;
-        }
+        tt_store(key, score_to_tt(best, ply), best_move.move(), depth, bound);
         return best;
     }
 };
@@ -359,7 +478,9 @@ struct RootResult {
     long long ms = 0;
 };
 
-Search S;
+Search S;                                    // main search thread
+std::vector<std::unique_ptr<Search>> HELPERS;  // extra Lazy SMP threads
+int g_threads = 1;
 
 std::vector<float> root_priors(const Board& board, const Movelist& moves) {
     std::vector<float> pri(moves.size(), 1.0f / std::max(1, moves.size()));
@@ -374,6 +495,99 @@ std::vector<float> root_priors(const Board& board, const Movelist& moves) {
     }
     for (auto& p : pri) p /= sum;
     return pri;
+}
+
+// Iterative deepening on one thread. Helper threads run the same loop (single PV,
+// staggered start depth) purely to fill the shared transposition table.
+RootResult iterate(Search& T, Board board, std::vector<RootMove> rms, int max_depth, long long time_ms, int multipv,
+                   int first_depth, bool verbose) {
+    RootResult res;
+    T.nodes = 0;
+    T.time_limit_ms = std::max(1LL, time_ms);
+    T.start = std::chrono::steady_clock::now();
+    T.nn.reset(board);
+    std::memset(T.killers, 0, sizeof(T.killers));
+    for (auto& side : T.history)
+        for (auto& row : side)
+            for (auto& h : row) h /= 2;
+
+    const int K = std::max(1, std::min(multipv, static_cast<int>(rms.size())));
+    res.moves = rms;
+
+    for (int depth = first_depth; depth <= max_depth; depth++) {
+        std::vector<RootMove> cur = rms;
+        std::vector<int> exact_scores;  // sorted descending
+        bool done = true;
+        size_t completed = 0;
+
+        for (size_t i = 0; i < cur.size(); i++) {
+            RootMove& rm = cur[i];
+            int alpha = static_cast<int>(exact_scores.size()) >= K ? exact_scores[K - 1] : -INF;
+            T.make(board, rm.move);
+            int s;
+            if (alpha == -INF && depth >= 5 && rm.exact && std::abs(rm.score) < MATE_BOUND) {
+                // Aspiration window around last iteration's score; widen on a fail.
+                int delta = 25, lo = rm.score - delta, hi = rm.score + delta;
+                while (true) {
+                    s = -T.negamax(board, depth - 1, -hi, -lo, 1, true);
+                    if (T.stop) break;
+                    if (s > lo && s < hi) break;
+                    delta *= 2;
+                    if (delta > 400) { lo = -INF; hi = INF; continue; }
+                    if (s <= lo) lo = std::max(-INF, s - delta);
+                    else hi = std::min(INF, s + delta);
+                }
+            } else if (alpha == -INF) {
+                s = -T.negamax(board, depth - 1, -INF, INF, 1, true);
+            } else {
+                s = -T.negamax(board, depth - 1, -alpha - 1, -alpha, 1, true);
+                if (!T.stop && s > alpha) s = -T.negamax(board, depth - 1, -INF, -alpha, 1, true);
+            }
+            T.unmake(board, rm.move);
+            if (T.stop) { done = false; break; }
+            completed++;
+
+            rm.score = s;
+            rm.exact = alpha == -INF || s > alpha;
+            if (rm.exact) {
+                rm.pv.assign(1, rm.move);
+                for (int k = 1; k < T.pv_len[1]; k++) rm.pv.push_back(T.pv[1][k]);
+                exact_scores.insert(std::upper_bound(exact_scores.begin(), exact_scores.end(), s, std::greater<int>()), s);
+            }
+        }
+        auto by_score = [](const RootMove& a, const RootMove& b) {
+            if (a.exact != b.exact) return a.exact;
+            return a.score > b.score;
+        };
+        if (!done) {
+            // Out of time mid-iteration. Once the previous top moves have been re-searched
+            // at the new depth their scores are trustworthy, so keep that partial result
+            // (it often catches a better move found late in the iteration).
+            if (T.is_main && completed >= static_cast<size_t>(K)) {
+                std::stable_sort(cur.begin(), cur.begin() + completed, by_score);
+                res.moves = cur;
+            }
+            break;
+        }
+
+        std::stable_sort(cur.begin(), cur.end(), by_score);
+        rms = cur;
+        res.moves = cur;
+        res.depth = depth;
+        res.ms = T.elapsed_ms();
+
+        if (verbose) {
+            std::cerr << "[engine] depth " << depth << " " << res.ms << " ms, best="
+                      << chess::uci::moveToUci(cur[0].move) << " score=" << cur[0].score << "\n";
+        }
+        if (!T.is_main) continue;
+        if (std::abs(cur[0].score) >= MATE_BOUND && depth >= 4) break;     // forced mate found
+        // Don't start an iteration that probably can't re-search the best move in time.
+        if (res.ms * 10 > time_ms * 6) break;
+    }
+    res.nodes = T.nodes;
+    res.ms = T.elapsed_ms();
+    return res;
 }
 
 RootResult search_root(Board board, int max_depth, long long time_ms, int multipv, bool verbose) {
@@ -392,68 +606,29 @@ RootResult search_root(Board board, int max_depth, long long time_ms, int multip
     }
     std::stable_sort(rms.begin(), rms.end(), [](const RootMove& a, const RootMove& b) { return a.prior > b.prior; });
 
-    S.nodes = 0;
-    S.stop = false;
-    S.time_limit_ms = std::max(1LL, time_ms);
-    S.start = std::chrono::steady_clock::now();
-    S.nn.reset(board);
-    std::memset(S.killers, 0, sizeof(S.killers));
-    for (auto& side : S.history)
-        for (auto& row : side)
-            for (auto& h : row) h /= 2;
-
-    const int K = std::max(1, std::min(multipv, static_cast<int>(rms.size())));
-    res.moves = rms;
-
-    for (int depth = 1; depth <= max_depth; depth++) {
-        std::vector<RootMove> cur = rms;
-        std::vector<int> exact_scores;  // sorted descending
-        bool done = true;
-
-        for (size_t i = 0; i < cur.size(); i++) {
-            RootMove& rm = cur[i];
-            int alpha = static_cast<int>(exact_scores.size()) >= K ? exact_scores[K - 1] : -INF;
-            S.make(board, rm.move);
-            int s;
-            if (alpha == -INF) {
-                s = -S.negamax(board, depth - 1, -INF, INF, 1, true);
-            } else {
-                s = -S.negamax(board, depth - 1, -alpha - 1, -alpha, 1, true);
-                if (!S.stop && s > alpha) s = -S.negamax(board, depth - 1, -INF, -alpha, 1, true);
-            }
-            S.unmake(board, rm.move);
-            if (S.stop) { done = false; break; }
-
-            rm.score = s;
-            rm.exact = alpha == -INF || s > alpha;
-            if (rm.exact) {
-                rm.pv.assign(1, rm.move);
-                for (int k = 1; k < S.pv_len[1]; k++) rm.pv.push_back(S.pv[1][k]);
-                exact_scores.insert(std::upper_bound(exact_scores.begin(), exact_scores.end(), s, std::greater<int>()), s);
-            }
-        }
-        if (!done) break;
-
-        std::stable_sort(cur.begin(), cur.end(), [](const RootMove& a, const RootMove& b) {
-            if (a.exact != b.exact) return a.exact;
-            return a.score > b.score;
-        });
-        rms = cur;
-        res.moves = cur;
-        res.depth = depth;
-        res.nodes = S.nodes;
-        res.ms = S.elapsed_ms();
-
-        if (verbose) {
-            std::cerr << "[engine] depth " << depth << " " << res.ms << " ms, " << S.nodes << " nodes ("
-                      << (S.nodes * 1000 / std::max(1LL, res.ms)) << " nps), best="
-                      << chess::uci::moveToUci(cur[0].move) << " score=" << cur[0].score << "\n";
-        }
-        if (std::abs(cur[0].score) >= MATE_BOUND && depth >= 4) break;     // forced mate found
-        if (res.ms * 2 > time_ms) break;   // the next iteration would very likely not finish
+    while (static_cast<int>(HELPERS.size()) < g_threads - 1) {
+        HELPERS.push_back(std::make_unique<Search>());
+        HELPERS.back()->is_main = false;
     }
-    res.nodes = S.nodes;
+
+    g_stop = false;
+    std::vector<std::thread> threads;
+    std::vector<std::uint64_t> helper_nodes(g_threads, 0);
+    for (int t = 1; t < g_threads; t++) {
+        threads.emplace_back([&, t] {
+            Search& H = *HELPERS[t - 1];
+            helper_nodes[t] = iterate(H, board, rms, max_depth, time_ms, 1, 1 + (t & 1), false).nodes;
+        });
+    }
+    res = iterate(S, board, rms, max_depth, time_ms, multipv, 1, verbose);
+    g_stop = true;   // main is done: release the helpers
+    for (auto& th : threads) th.join();
+    for (auto n : helper_nodes) res.nodes += n;
     res.ms = S.elapsed_ms();
+    if (verbose) {
+        std::cerr << "[engine] " << g_threads << " thread(s), " << res.nodes << " nodes, "
+                  << (res.nodes * 1000 / std::max(1LL, res.ms)) << " nps\n";
+    }
     return res;
 }
 
@@ -467,7 +642,17 @@ int depth_cap_for_elo(int elo) { return elo >= 2900 ? 99 : std::clamp((elo - 500
 
 size_t choose_move(const RootResult& r, int elo, std::mt19937& rng) {
     if (elo >= 2900 || r.moves.size() < 2) return 0;
-    const double temp = std::max(8.0, (2900.0 - elo) / 7.0);   // centipawns
+    // Sampling temperature in centipawns, interpolated between points calibrated with
+    // training/match.py against Stockfish's UCI_Elo (1400 and up; below that extrapolated).
+    static const double pts[][2] = {{800, 300}, {1400, 214}, {1800, 75}, {2200, 50}, {2600, 28}, {2900, 8}};
+    double temp = 300;
+    for (size_t i = 1; i < std::size(pts); i++) {
+        if (elo <= pts[i][0]) {
+            const double t = std::clamp((elo - pts[i - 1][0]) / (pts[i][0] - pts[i - 1][0]), 0.0, 1.0);
+            temp = pts[i - 1][1] + t * (pts[i][1] - pts[i - 1][1]);
+            break;
+        }
+    }
     const int best = r.moves[0].score;
     if (best >= MATE_BOUND && elo >= 1400) return 0;          // never miss a found mate above beginner level
     std::vector<double> w(r.moves.size(), 0.0);
@@ -494,9 +679,16 @@ std::string pv_string(const std::vector<Move>& pv, size_t max_len = 8) {
     return s;
 }
 
-void run_go(const std::string& fen, int elo, int max_depth, long long total_ms, std::ostream& out) {
+void run_go(const std::string& fen, const std::vector<std::string>& moves, int elo, int max_depth, long long total_ms,
+            std::ostream& out) {
     static std::mt19937 rng(static_cast<unsigned>(std::chrono::steady_clock::now().time_since_epoch().count()));
     Board board(fen);
+    // Replaying the game's moves gives the board its history, so the search sees repetitions.
+    for (const auto& u : moves) {
+        Move m = chess::uci::uciToMove(board, u);
+        if (m == Move(Move::NO_MOVE)) break;
+        board.makeMove(m);
+    }
     Movelist legal;
     chess::movegen::legalmoves(legal, board);
     if (legal.empty()) {
@@ -525,6 +717,11 @@ void run_go(const std::string& fen, int elo, int max_depth, long long total_ms, 
     // If time ran out before depth 1 finished there are no scores; report the static eval.
     const int eval_stm = r.depth > 0 ? chosen.score : S.nn.evaluate(board);
     out << "EVAL:" << to_white_pawns(eval_stm) << "\n";
+    if (std::abs(eval_stm) >= MATE_BOUND) {
+        // Mate in N full moves, positive when White is the one mating.
+        const int n = (MATE - std::abs(eval_stm) + 1) / 2;
+        out << "MATE:" << (((eval_stm > 0) == white) ? n : -n) << "\n";
+    }
     out << "DEPTH_REACHED:" << r.depth << "\n";
     out << "TUTOR_DATA:\n";
     for (size_t i = 0; i < r.moves.size() && i < 3; i++) {
@@ -617,7 +814,7 @@ int bench(long long ms) {
     std::uint64_t total_nodes = 0;
     long long total_ms = 0;
     for (auto fen : fens) {
-        std::fill(TT.begin(), TT.end(), TTEntry{});
+        tt_clear();
         RootResult r = search_root(Board(fen), 99, ms, 1, false);
         total_nodes += r.nodes;
         total_ms += r.ms;
@@ -628,16 +825,32 @@ int bench(long long ms) {
     return 0;
 }
 
-int main(int argc, char* argv[]) {
+#include "tests.hpp"
+
+int main(int argc, char* argv_in[]) {
     std::ios::sync_with_stdio(false);
+    // "--threads N" may appear anywhere; strip it before the positional arguments are read.
+    std::vector<char*> args;
+    for (int i = 0; i < argc; i++) {
+        if (std::string(argv_in[i]) == "--threads" && i + 1 < argc) {
+            g_threads = std::clamp(std::atoi(argv_in[++i]), 1, 256);
+            continue;
+        }
+        args.push_back(argv_in[i]);
+    }
+    argc = static_cast<int>(args.size());
+    char** argv = args.data();
+
     if (argc < 2) {
-        std::cerr << "usage: engine <fen> [elo] [depth] [time_ms] | --server | --selftest | --bench [ms]\n";
+        std::cerr << "usage: engine <fen> [elo] [depth] [time_ms] | --server | --selftest | --bench [ms]"
+                     "   (any mode: --threads N)\n";
         return 1;
     }
     if (!load_networks(argv[0])) return 2;
 
     std::string mode = argv[1];
     if (mode == "--selftest") return selftest(argv[0]);
+    if (mode == "--test") return tests::run(argv[0]);
     if (mode == "--bench") return bench(argc >= 3 ? std::stoll(argv[2]) : 2000);
 
     if (mode == "--server") {
@@ -650,7 +863,7 @@ int main(int argc, char* argv[]) {
             ss >> cmd;
             if (cmd == "quit") break;
             if (cmd == "newgame") {
-                std::fill(TT.begin(), TT.end(), TTEntry{});
+                tt_clear();
                 std::cout << "OK" << std::endl;
                 continue;
             }
@@ -658,11 +871,20 @@ int main(int argc, char* argv[]) {
                 int elo = 3000, depth = 99;
                 long long ms = 3000;
                 ss >> elo >> depth >> ms;
-                std::string fen;
-                std::getline(ss, fen);
+                // Rest of the line: "<fen> [moves m1 m2 ...]"
+                std::string rest;
+                std::getline(ss, rest);
+                std::string fen = rest;
+                std::vector<std::string> moves;
+                const auto mpos = rest.find(" moves");
+                if (mpos != std::string::npos) {
+                    fen = rest.substr(0, mpos);
+                    std::istringstream ms_in(rest.substr(mpos + 6));
+                    for (std::string u; ms_in >> u;) moves.push_back(u);
+                }
                 fen.erase(0, fen.find_first_not_of(' '));
                 try {
-                    run_go(fen, elo, depth, ms, std::cout);
+                    run_go(fen, moves, elo, depth, ms, std::cout);
                 } catch (const std::exception& e) {
                     std::cout << "ERROR:" << e.what() << "\nEND" << std::endl;
                 }
@@ -678,6 +900,6 @@ int main(int argc, char* argv[]) {
     const int elo = argc >= 3 ? static_cast<int>(std::stof(argv[2])) : 3000;
     const int depth = argc >= 4 ? std::stoi(argv[3]) : 99;
     const long long ms = argc >= 5 ? std::stoll(argv[4]) : 3000;
-    run_go(fen, elo, depth, ms, std::cout);
+    run_go(fen, {}, elo, depth, ms, std::cout);
     return 0;
 }
