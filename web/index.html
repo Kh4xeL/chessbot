@@ -12,6 +12,7 @@
     <script src="https://d3js.org/d3.v3.min.js"></script>
     <link rel="stylesheet" href="/web/tree.css">
     <script src="/web/tree.js"></script>
+    <script src="/web/ui.js"></script>
 
     <style>
         body {
@@ -228,6 +229,46 @@
             transition: color 0.2s;
         }
         .back-btn:hover { color: #fff; }
+
+        /* --- Shared panels, buttons, engine lines --- */
+        .side-panel {
+            background-color: #2d2d2d;
+            padding: 16px;
+            border-radius: 8px;
+            width: 340px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.5);
+            text-align: left;
+        }
+        .panel-title {
+            font-size: 13px; font-weight: bold; color: #4CAF50; text-transform: uppercase;
+            letter-spacing: 0.5px; margin: 0 0 8px 0; display: flex; justify-content: space-between; align-items: center;
+        }
+        .btn-row { display: flex; gap: 6px; flex-wrap: wrap; justify-content: center; margin: 6px 0 12px 0; }
+        .tool-btn {
+            background: #3a3a3a; color: #eee; border: 1px solid #555; border-radius: 5px;
+            padding: 6px 10px; font-size: 13px; cursor: pointer; transition: background 0.15s;
+        }
+        .tool-btn:hover { background: #4a4a4a; }
+        .tool-btn:disabled { opacity: 0.4; cursor: default; }
+        .eval-badge {
+            display: inline-block; min-width: 44px; text-align: center; font-weight: bold; font-size: 12px;
+            padding: 2px 5px; border-radius: 4px; margin-right: 6px; font-family: Consolas, monospace;
+        }
+        .engine-line {
+            font-size: 13px; color: #ccc; padding: 5px 6px; border-radius: 4px; cursor: pointer;
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+        }
+        .engine-line:hover { background: #383838; }
+        .graph-box { height: 90px; border-radius: 6px; overflow: hidden; margin-bottom: 12px; }
+        .move-list { max-height: 300px; overflow-y: auto; font-size: 14px; background: #222; border-radius: 6px; padding: 6px; }
+        .move-row { display: grid; grid-template-columns: 34px 1fr 1fr; padding: 2px 4px; }
+        .move-row:nth-child(odd) { background: #262626; }
+        .move-row .num { color: #777; }
+        .move-row .mv { color: #ddd; }
+        .move-row .mv.last { color: #4CAF50; font-weight: bold; }
+        .stat-row { display: flex; justify-content: space-between; font-size: 13px; color: #ccc; margin: 3px 0; }
+        .captured { font-size: 18px; letter-spacing: -2px; color: #bbb; min-height: 22px; }
+        .muted-line { opacity: 0.45; }
     </style>
 </head>
 
@@ -282,6 +323,14 @@
                 </label>
                 <label><input type="checkbox" id="showEvalBar" checked onchange="document.getElementById('evalBarWrap').style.display = this.checked ? 'flex' : 'none'"> Eval Bar</label>
                 <label><input type="checkbox" id="showArrows" checked onchange="if(!this.checked) document.getElementById('arrowLayer').innerHTML=''; else triggerAssistance()"> Arrows</label>
+                <label title="Show the evaluation at the end of each suggested line"><input type="checkbox" id="showLineEvals" checked onchange="triggerAssistance()"> Line evals</label>
+                <label>Play as:
+                    <select id="playAs">
+                        <option value="w">White</option>
+                        <option value="b">Black</option>
+                        <option value="r">Random</option>
+                    </select>
+                </label>
             </div>
 
             <div style="display: flex; gap: 10px; align-items: stretch; justify-content: center; width: 100%;">
@@ -299,8 +348,24 @@
                 </div>
             </div>
 
+            <div class="btn-row" id="playToolbar">
+                <button class="tool-btn" onclick="startNewGame()" title="Start a new game with the chosen colour">♻️ New game</button>
+                <button class="tool-btn" onclick="undoMove()" title="Take back your last move">↶ Undo</button>
+                <button class="tool-btn" onclick="flipBoard()" title="Flip the board">🔄 Flip</button>
+                <button class="tool-btn" onclick="UI.copy(playPgn(), this)">📋 Copy PGN</button>
+                <button class="tool-btn" onclick="UI.download('game.pgn', playPgn())">💾 Download PGN</button>
+            </div>
+            <div class="btn-row" id="analysisToolbar" style="display: none;">
+                <button class="tool-btn" onclick="navFirst()" title="Start (Home)">⏮</button>
+                <button class="tool-btn" onclick="navPrev()" title="Previous move (←)">◀</button>
+                <button class="tool-btn" onclick="navNext()" title="Next move (→)">▶</button>
+                <button class="tool-btn" onclick="navLast()" title="End of line (End)">⏭</button>
+                <button class="tool-btn" onclick="flipBoard()" title="Flip the board (F)">🔄 Flip</button>
+            </div>
+
             <div class="status-box">
                 <div id="status">White to move</div>
+                <div id="engineInfo" style="font-size: 12px; color: #888; margin-top: 4px;"></div>
                 <div id="thinking" class="spinner">Engine is calculating...</div>
                 <div id="move" class="resp">move</div>
                 <div id="tutorPanel"></div>
@@ -312,13 +377,40 @@
             </div>
         </div>
 
+        <div id="playPanel" class="side-panel" style="display: none;">
+            <div class="panel-title">Game</div>
+            <div class="stat-row"><span id="capturedByWhite" class="captured"></span><span id="materialBalance" style="font-weight:bold;"></span></div>
+            <div class="stat-row"><span id="capturedByBlack" class="captured"></span></div>
+            <div class="panel-title" style="margin-top: 10px;">Evaluation</div>
+            <div id="playGraph" class="graph-box"></div>
+            <div class="panel-title">Moves</div>
+            <div id="moveList" class="move-list"></div>
+        </div>
+
         <div id="analysisView"
             style="display: none; background-color: #2d2d2d; padding: 20px; border-radius: 8px; width: 450px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); text-align: left;">
             <h3 style="margin-top: 0; color: #4CAF50; border-bottom: 1px solid #444; padding-bottom: 10px; display: flex; justify-content: space-between; align-items: center;">
                 Post-Game Analysis
                 <button id="toggleViewBtn" onclick="toggleAnalysisView()" style="padding: 6px 12px; background: #4CAF50; color: #fff; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; font-weight: bold; transition: background 0.2s;">🌲 Tree View</button>
             </h3>
-            <div id="analysisSummary" style="background: #333; padding: 12px; border-radius: 6px; margin-bottom: 15px;"></div>
+            <div id="analysisSummary" style="background: #333; padding: 12px; border-radius: 6px; margin-bottom: 12px;"></div>
+            <div id="analysisGraph" class="graph-box" title="Click to jump to a move"></div>
+
+            <div style="background: #262626; border-radius: 6px; padding: 8px 10px; margin-bottom: 12px;">
+                <div class="panel-title" style="margin-bottom: 4px;">
+                    <span>Stockfish <span id="engineDepth" style="color:#888; font-weight: normal; text-transform: none;"></span></span>
+                    <label style="font-size: 12px; color: #ccc; text-transform: none; font-weight: normal; cursor: pointer;">
+                        <input type="checkbox" id="engineArrows" checked onchange="refreshEngineLines(true)"> best-move arrow
+                    </label>
+                </div>
+                <div id="engineLines"><div class="engine-line" style="color:#777;">…</div></div>
+            </div>
+
+            <div class="btn-row" style="justify-content: flex-start;">
+                <button class="tool-btn" onclick="UI.copy(analysisPgn(), this)" title="PGN with all explored variations">📋 Copy PGN</button>
+                <button class="tool-btn" onclick="UI.download('analysis.pgn', analysisPgn())">💾 Download PGN</button>
+                <button class="tool-btn" onclick="UI.copy(game.fen(), this)">📋 Copy FEN</button>
+            </div>
             
             <div id="listContainer" style="display: block;">
                 <div id="analysisDetails" style="max-height: 60vh; overflow-y: auto; padding-right: 10px; scroll-behavior: smooth;"></div>
@@ -342,6 +434,11 @@
         var $move = $('#move');
         var $tutorPanel = $('#tutorPanel');
         var appMode = 'PLAY';
+        var playerColor = 'w';            // the human's colour in play mode
+        var playEvals = [];               // per ply: {evalPawns, mate} after that ply (engine's view)
+        var lastEngineInfo = '';
+        var analysisSummary = null;       // summary block of the last /analyze call
+        var engineReq = 0;                // token to drop stale /analyze_position replies
         var currentViewMode = 'LIST';
         var branchColors = { 'main': 'transparent' };
         var predefinedColors = [
@@ -364,12 +461,15 @@
             $('#toggleViewBtn').text(currentViewMode === 'LIST' ? '🌲 Tree View' : '📋 List View');
             $('#listContainer').toggle();
             $('#treeContainer').toggle();
-            if (currentViewMode === 'TREE') renderTreeView();
+            if (currentViewMode === 'TREE') {
+                renderTreeView();
+                goToMove(window.currentMoveIndex);   // highlight and centre the current move
+            }
         }
 
         function onDragStart(source, piece, position, orientation) {
             if (game.game_over()) return false;
-            if (appMode === 'PLAY' && piece.search(/^b/) !== -1) return false;
+            if (appMode === 'PLAY' && (game.turn() !== playerColor || piece[0] !== playerColor)) return false;
         }
 
         function onDrop(source, target) {
@@ -384,6 +484,9 @@
 
             updateStatus();
             $tutorPanel.hide();
+            $('#arrowLayer').empty();
+            playEvals.push(null);   // the human's move has no engine eval of its own
+            refreshPlayPanel();
             window.setTimeout(makeEngineMove, 250);
         }
 
@@ -409,7 +512,7 @@
         }
 
         function getThreatDetection() {
-            if (game.game_over() || game.turn() !== 'w') return;
+            if (game.game_over() || game.turn() !== playerColor) return;
             var currentElo = parseInt(document.getElementById('eloInput').value) || 2500;
             $tutorPanel.removeClass('threat-alert').html('<span style="color:#888;">Scanning for immediate threats...</span>').show();
 
@@ -420,7 +523,7 @@
             })
                 .then(res => res.json())
                 .then(data => {
-                    if (game.turn() !== 'w') return;
+                    if (game.turn() !== playerColor) return;
                     $tutorPanel.empty();
                     $('#arrowLayer').empty();
                     if (data.is_threat) {
@@ -450,10 +553,14 @@
                 .catch(err => console.error("Threat fetch error:", err));
         }
 
+        // Lines whose final eval is this much worse (pawns, for the player) than the best
+        // one are shown dimmed and get no arrow: they're legal but not real alternatives.
+        var WEAK_LINE_PAWNS = 1.0;
+
         function getTutorHints() {
-            if (game.game_over() || game.turn() !== 'w') return;
+            if (game.game_over() || game.turn() !== playerColor) return;
             $tutorPanel.removeClass('threat-alert').html('<span style="color:#888;">Tutor is analyzing your best options...</span>').show();
-            var currentElo = parseInt(document.getElementById('eloInput').value) || 2500;
+            var fenAtRequest = game.fen();
             fetch('/get_move', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -462,25 +569,43 @@
             })
                 .then(response => response.json())
                 .then(data => {
-                    if (game.turn() !== 'w') return;
+                    if (game.fen() !== fenAtRequest) return;   // position changed meanwhile
                     $tutorPanel.empty();
                     $('#arrowLayer').empty();
                     $tutorPanel.append('<strong>Tutor Ideas (Your best moves):</strong><br>');
-                    if (data.top_3 && data.top_3.length > 0) {
-                        data.top_3.forEach((tutor, idx) => {
-                            $tutorPanel.append(`
-                            <div class="tutor-line" style="margin-bottom: 8px;">
-                                <span class="tutor-move">${tutor.move}</span>
-                                <span style="color: #4CAF50; font-weight: bold;">${tutor.tactics || "Solid Move"}</span><br>
-                                <span style="font-size: 12px; color: #aaa;">Predicted line: ${tutor.idea || "None"}</span>
+                    var lines = data.top_3 || [];
+                    var showEvals = document.getElementById('showLineEvals').checked;
+                    var sign = playerColor === 'w' ? 1 : -1;
+                    function forMe(t) {   // line value from the player's side, mates dominate
+                        if (t.mate !== null && t.mate !== undefined) return sign * (t.mate > 0 ? 1000 - t.mate : -1000 - t.mate);
+                        return t.eval_pawns === null || t.eval_pawns === undefined ? null : sign * t.eval_pawns;
+                    }
+                    var best = lines.length ? forMe(lines[0]) : null;
+                    var colors = ['#2ecc71', '#f1c40f', '#e67e22'];
+                    var good = 0, arrows = [];
+                    lines.forEach((tutor, idx) => {
+                        var v = forMe(tutor);
+                        var weak = idx > 0 && best !== null && v !== null && best - v > WEAK_LINE_PAWNS;
+                        var san = UI.uciToSan(game.fen(), (tutor.idea || tutor.move).split(' ').filter(Boolean));
+                        var lineText = san.length ? UI.sanLine(game.fen(), san, 8) : (tutor.idea || 'None');
+                        var badge = showEvals && (tutor.eval_pawns !== null || tutor.mate !== null) ? UI.evalBadge(tutor.eval_pawns, tutor.mate) : '';
+                        $tutorPanel.append(`
+                            <div class="tutor-line ${weak ? 'muted-line' : ''}" style="margin-bottom: 8px;">
+                                ${badge}<span class="tutor-move" style="border-left: 3px solid ${weak ? '#666' : colors[idx]};">${san[0] || tutor.move}</span>
+                                <span style="color: #4CAF50; font-weight: bold;">${tutor.tactics || "Solid Move"}</span>
+                                ${weak ? '<span style="color:#e67e22; font-size: 12px;"> · much worse</span>' : ''}<br>
+                                <span style="font-size: 12px; color: #aaa;">Line: ${lineText}</span>
                             </div>
                         `);
-                            if (document.getElementById('showArrows').checked) {
-                                var color = (idx === 0) ? '#2ecc71' : (idx === 1 ? '#f1c40f' : '#e67e22');
-                                drawArrow(tutor.move.substring(0,2), tutor.move.substring(2,4), color, 0.8);
-                            }
-                        });
-                    }
+                        if (!weak) good++;
+                        if (document.getElementById('showArrows').checked && !weak) {
+                            arrows.push([tutor.move, colors[idx], idx === 0 ? 0.9 : 0.7]);
+                        }
+                    });
+                    // Draw the best move last so it stays on top where arrows overlap.
+                    arrows.reverse().forEach(a => drawArrow(a[0].substring(0,2), a[0].substring(2,4), a[1], a[2]));
+                    if (lines.length === 1) $tutorPanel.append('<div style="font-size: 12px; color: #aaa;">This is your only legal move.</div>');
+                    else if (lines.length > 1 && good === 1) $tutorPanel.append('<div style="font-size: 12px; color: #f1c40f;">⚠️ Only one good move here; the others lose a lot.</div>');
                 })
                 .catch(err => console.error("Tutor fetch error:", err));
         }
@@ -495,9 +620,10 @@
         $('#assistLevel').on('change', triggerAssistance);
 
         function makeEngineMove() {
-            if (game.game_over()) return;
+            if (game.game_over() || appMode !== 'PLAY' || game.turn() === playerColor) return;
             $move.hide();
             $thinking.show();
+            var fenAtRequest = game.fen();
             var customDepth = parseInt(document.getElementById('depthInput').value) || 30;
             var currentElo = parseInt(document.getElementById('eloInput').value) || 2500;
             fetch('/get_move', {
@@ -508,12 +634,23 @@
                 .then(response => response.json())
                 .then(data => {
                     $thinking.hide();
-                    $move.html('Engine responds ' + data.move + ' (' + data.time + 's)').show();
-                    game.move(data.move, { sloppy: true });
+                    if (game.fen() !== fenAtRequest || appMode !== 'PLAY') return;   // new game / undo meanwhile
+                    var played = game.move(data.move, { sloppy: true });
+                    if (!played) return;
+                    $move.html('Engine plays ' + played.san + ' (' + data.time + 's)').show();
                     board.position(game.fen());
                     updateStatus();
+                    if (data.eval_pawns !== undefined) {
+                        updateMaterialBar(data.eval_pawns, game.in_checkmate(), data.mate);
+                        playEvals.push({ evalPawns: data.eval_pawns, mate: data.mate });
+                    } else {
+                        playEvals.push(null);
+                    }
+                    lastEngineInfo = data.engine === 'PolyGlot Book' ? '📖 Opening book move'
+                        : `Engine: depth ${data.depth_reached} · ${data.time}s · eval ${UI.fmtEval(data.eval_pawns, data.mate)}`;
+                    $('#engineInfo').text(lastEngineInfo);
+                    refreshPlayPanel();
                     triggerAssistance();
-                    if (data.eval_pawns !== undefined) updateMaterialBar(data.eval_pawns, game.in_checkmate(), data.mate);
                 })
                 .catch(err => { $thinking.hide(); console.error("API Error:", err); });
         }
@@ -650,6 +787,9 @@
 
         function showStartPage() {
             appMode = 'PLAY';
+            engineReq++;
+            board.orientation('white');
+            syncEvalBar();
             $('#startPage').show();
             $('#appView').hide();
             $('#importPage').hide();
@@ -664,7 +804,209 @@
             $('#analysisView').hide();
         }
 
-        function showPlayPage() { fetch('/new_game', { method: 'POST' }).catch(() => {}); appMode = 'PLAY'; $('#startPage').hide(); $('#importPage').hide(); $('#appView').css('display', 'flex'); }
+        function showPlayPage() {
+            appMode = 'PLAY';
+            $('#startPage').hide(); $('#importPage').hide(); $('#analysisView').hide();
+            $('#appView').css('display', 'flex');
+            $('.controls, .status-box, #playToolbar, #playPanel').show();
+            $('#analysisToolbar').hide();
+            startNewGame();
+        }
+
+        // ---------------------------------------------------------------- play mode helpers
+        function startNewGame() {
+            fetch('/new_game', { method: 'POST' }).catch(() => {});
+            var choice = $('#playAs').val();
+            playerColor = choice === 'r' ? (Math.random() < 0.5 ? 'w' : 'b') : choice;
+            appMode = 'PLAY';
+            game.reset();
+            board.orientation(playerColor === 'w' ? 'white' : 'black');
+            syncEvalBar();
+            board.start();
+            playEvals = [];
+            lastEngineInfo = '';
+            $('#engineInfo').text('');
+            $('#arrowLayer').empty();
+            $tutorPanel.hide(); $move.hide(); $thinking.hide(); $('#analyzeBtn').hide();
+            updateMaterialBar(0);
+            updateStatus();
+            refreshPlayPanel();
+            if (playerColor === 'b') window.setTimeout(makeEngineMove, 300);
+            else triggerAssistance();
+        }
+
+        function undoMove() {
+            if (appMode !== 'PLAY') return;
+            // Take back to the last position where it is the player's turn (usually 2 plies).
+            var undone = 0;
+            do {
+                if (!game.undo()) break;
+                playEvals.pop();
+                undone++;
+            } while (game.turn() !== playerColor);
+            if (!undone) return;
+            board.position(game.fen());
+            $thinking.hide(); $move.hide(); $('#analyzeBtn').hide();
+            $('#arrowLayer').empty();
+            var last = playEvals.filter(Boolean).slice(-1)[0];
+            updateMaterialBar(last ? last.evalPawns : 0, false, last ? last.mate : null);
+            updateStatus();
+            refreshPlayPanel();
+            if (game.history().length === 0 && playerColor === 'b') window.setTimeout(makeEngineMove, 300);
+            else triggerAssistance();
+        }
+
+        // The eval bar's White side sits on the same side as White's pieces.
+        function syncEvalBar() {
+            $('#evalBarContainer').css('flex-direction', board.orientation() === 'white' ? 'column-reverse' : 'column');
+        }
+
+        function flipBoard() {
+            board.flip();
+            syncEvalBar();
+            $('#arrowLayer').empty();
+            if (appMode === 'ANALYSIS') goToMove(window.currentMoveIndex);
+            else triggerAssistance();
+        }
+
+        function refreshPlayPanel() {
+            // Move list
+            var hist = game.history();
+            var startFen = historyPayload().start_fen;
+            var fullmove = parseInt(startFen.split(' ')[5] || '1', 10);
+            var blackFirst = startFen.split(' ')[1] === 'b';
+            var rows = '', i = 0;
+            if (blackFirst && hist.length) {
+                rows += `<div class="move-row"><span class="num">${fullmove}.</span><span class="mv">…</span><span class="mv ${hist.length === 1 ? 'last' : ''}">${hist[0]}</span></div>`;
+                i = 1; fullmove++;
+            }
+            for (; i < hist.length; i += 2, fullmove++) {
+                rows += `<div class="move-row"><span class="num">${fullmove}.</span>` +
+                    `<span class="mv ${i === hist.length - 1 ? 'last' : ''}">${hist[i]}</span>` +
+                    `<span class="mv ${i + 1 === hist.length - 1 ? 'last' : ''}">${hist[i + 1] || ''}</span></div>`;
+            }
+            $('#moveList').html(rows || '<div style="color:#777; padding: 4px;">No moves yet.</div>');
+            var ml = document.getElementById('moveList');
+            ml.scrollTop = ml.scrollHeight;
+
+            // Captured material
+            var mat = UI.material(game.fen());
+            $('#capturedByWhite').text(mat.blackLost).attr('title', 'Captured by White');
+            $('#capturedByBlack').text(mat.whiteLost).attr('title', 'Captured by Black');
+            $('#materialBalance').text(mat.balance === 0 ? '=' : (mat.balance > 0 ? 'White +' + mat.balance : 'Black +' + (-mat.balance)));
+
+            // Eval graph: carry the last known engine eval through the human's plies
+            var last = { evalPawns: 0, mate: null };
+            var pts = playEvals.map(e => { if (e) last = e; return { evalPawns: last.evalPawns, mate: last.mate }; });
+            UI.renderEvalGraph('#playGraph', pts, pts.length - 1, null, 0);
+        }
+
+        function playPgn() {
+            var result = game.in_checkmate() ? (game.turn() === 'w' ? '0-1' : '1-0') : (game.in_draw() ? '1/2-1/2' : '*');
+            var elo = $('#eloDisplay').text();
+            var you = 'You', bot = 'Hybrid NNUE (' + elo + ')';
+            var start = historyPayload().start_fen;
+            var headers = { Event: 'Casual game', Site: 'Hybrid AI Chess Tutor', Date: UI.today(),
+                            White: playerColor === 'w' ? you : bot, Black: playerColor === 'w' ? bot : you, Result: result };
+            if (start !== 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1') { headers.SetUp = '1'; headers.FEN = start; }
+            var body = game.pgn().replace(/^\[.*\]\s*$/gm, '').trim();
+            return UI.pgnHeaders(headers) + '\n\n' + (body ? body + ' ' : '') + result + '\n';
+        }
+
+        // ---------------------------------------------------------------- analysis helpers
+        function analysisPgn() {
+            var h = Object.assign({}, (analysisSummary && analysisSummary.headers) || {});
+            if (!h.Event) h.Event = 'Analysis';
+            h.Annotator = 'Hybrid AI Chess Tutor';
+            var start = analysisSummary && analysisSummary.start_fen;
+            if (start && start !== 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1') { h.SetUp = '1'; h.FEN = start; }
+            return UI.pgnFromTree(window.analysisMoves, h, h.Result || '*');
+        }
+
+        function mainLine() { return window.analysisMoves.filter(m => m.branchId === 'main'); }
+
+        function refreshAnalysisGraph() {
+            var ml = mainLine();
+            var cur = window.analysisMoves[window.currentMoveIndex];
+            var idx = cur ? ml.indexOf(cur) : -1;
+            UI.renderEvalGraph('#analysisGraph',
+                ml.map(m => ({ evalPawns: m.eval_pawns, mate: m.is_checkmate ? (m.color === 'White' ? 1 : -1) : null, cls: m.classification })),
+                cur && idx === -1 ? null : idx,
+                i => goToMove(i === -1 ? -1 : window.analysisMoves.indexOf(ml[i])),
+                analysisSummary ? (analysisSummary.start_eval_cp || 0) / 100 : 0);
+        }
+
+        // Live Stockfish lines for the position on the board. A quick pass first, then a
+        // deeper one; replies for a position you've already left are dropped.
+        var engineLinesCache = null;
+        function refreshEngineLines(redrawOnly) {
+            if (appMode !== 'ANALYSIS') return;
+            if (redrawOnly) { renderEngineLines(engineLinesCache); return; }
+            var fen = game.fen();
+            var token = ++engineReq;
+            $('#engineDepth').text('· thinking…');
+            [250, 1500].forEach(ms => {
+                fetch('/analyze_position', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ fen: fen, multipv: 3, time_ms: ms })
+                }).then(r => r.json()).then(data => {
+                    if (token !== engineReq || game.fen() !== fen) return;
+                    if (engineLinesCache && engineLinesCache.fen === fen && engineLinesCache.depth > data.depth) return;
+                    engineLinesCache = Object.assign({ fen: fen }, data);
+                    renderEngineLines(engineLinesCache);
+                }).catch(() => {});
+            });
+        }
+
+        function renderEngineLines(data) {
+            $('svg#arrowLayer line.engine-arrow').remove();
+            if (!data || data.fen !== game.fen()) return;
+            if (data.game_over) { $('#engineDepth').text('· game over'); $('#engineLines').html(''); return; }
+            $('#engineDepth').text('· depth ' + data.depth);
+            var html = '';
+            data.lines.forEach((l, i) => {
+                var full = UI.sanLine(data.fen, l.san, 12);
+                html += `<div class="engine-line" onclick="playEngineMove('${l.uci[0]}')" title="${full}  (click to play ${l.san[0]})">` +
+                        UI.evalBadge(l.eval_pawns, l.mate) + full + '</div>';
+            });
+            $('#engineLines').html(html || '<div class="engine-line" style="color:#777;">No lines.</div>');
+            if (document.getElementById('engineArrows').checked && data.lines.length) {
+                var u = data.lines[0].uci[0];
+                drawArrow(u.substring(0, 2), u.substring(2, 4), '#54a0ff', 0.75);
+                var lines = document.querySelectorAll('svg#arrowLayer line');
+                if (lines.length) lines[lines.length - 1].classList.add('engine-arrow');
+            }
+        }
+
+        function playEngineMove(uci) {
+            var oldFen = game.fen();
+            var mv = game.move({ from: uci.substring(0, 2), to: uci.substring(2, 4), promotion: uci[4] || 'q' });
+            if (!mv) return;
+            board.position(game.fen());
+            exploreCustomMove(oldFen, mv, mv.from, mv.to);
+        }
+
+        function navFirst() { if (window.analysisMoves.length) goToMove(-1); }
+        function navPrev() {
+            var m = window.analysisMoves[window.currentMoveIndex];
+            if (!m) return;
+            goToMove(m.parentId ? window.analysisMoves.findIndex(x => x.id === m.parentId) : -1);
+        }
+        function navNext() {
+            var m = window.analysisMoves[window.currentMoveIndex];
+            var branch = m ? m.branchId : 'main', parent = m ? m.id : null;
+            var kids = window.analysisMoves.map((x, i) => [x, i]).filter(p => (p[0].parentId || null) === parent);
+            if (!kids.length) return;
+            var pick = kids.find(p => p[0].branchId === branch) || kids[0];
+            goToMove(pick[1]);
+        }
+        function navLast() {
+            for (var guard = 0; guard < 1000; guard++) {
+                var before = window.currentMoveIndex;
+                navNext();
+                if (window.currentMoveIndex === before) break;
+            }
+        }
         function showImportPage() { $('#startPage').hide(); $('#appView').hide(); $('#importPage').show(); $('#importText').val(''); }
 
         function renderAnalysisDetails() {
@@ -757,9 +1099,11 @@
                 // Construct the new move object
                 var newMove = {
                     move_index: newIndex,
-                    move_number: Math.floor(newIndex / 2) + 1,
+                    move_number: parseInt(oldFen.split(' ')[5] || '1', 10),
                     color: game.turn() === 'b' ? 'White' : 'Black',
                     san: data.san,
+                    uci: moveObj.from + moveObj.to + (moveObj.promotion || ''),
+                    fen_before: oldFen,
                     from_sq: fromSq,
                     to_sq: toSq,
                     fen_after: data.fen_after,
@@ -799,20 +1143,31 @@
                     // Route to analysis view
                     $('#importPage').hide();
                     $('#appView').css('display', 'flex');
-                    $('.controls, .status-box').hide();
+                    $('.controls, .status-box, #playToolbar, #playPanel').hide();
+                    $('#analysisToolbar').show();
                     $('#analysisView').show();
+                    board.orientation('white');
+                    syncEvalBar();
 
                     var s = data.summary;
-                    var evalPrefix = s.final_eval_cp > 0 ? '+' : '';
+                    analysisSummary = s;
+                    var acc = UI.accuracy(data.moves, s.start_eval_cp || 0);
+                    var fmtAcc = a => a === null ? '–' : a.toFixed(1) + '%';
+                    var row = (label, w, b, color) => `<tr><td style="color:${color || '#ccc'};">${label}</td><td>${w}</td><td>${b}</td></tr>`;
                     $('#analysisSummary').html(`
                 <div style="display: flex; justify-content: space-between; margin-bottom: 8px;">
                     <span><strong>Total Moves:</strong> ${s.total_moves}</span>
-                    <span><strong>Final Eval:</strong> ${evalPrefix}${(s.final_eval_cp / 100).toFixed(2)}</span>
+                    <span><strong>Final Eval:</strong> ${UI.fmtEval(s.final_eval_cp / 100, null)}</span>
                 </div>
-                <div style="display: flex; justify-content: space-between; color: #ccc;">
-                    <div><strong>White:</strong> ${s.white.Blunder} Blunders, ${s.white.Mistake} Mistakes</div>
-                    <div><strong>Black:</strong> ${s.black.Blunder} Blunders, ${s.black.Mistake} Mistakes</div>
-                </div>
+                <table style="width: 100%; font-size: 13px; border-collapse: collapse; text-align: center;">
+                    <tr style="color:#888;"><td></td><td>White</td><td>Black</td></tr>
+                    ${row('<strong>Accuracy</strong>', '<strong>' + fmtAcc(acc.White) + '</strong>', '<strong>' + fmtAcc(acc.Black) + '</strong>', '#fff')}
+                    ${row('Brilliant / Perfect', s.white.Brilliant + s.white.Perfect, s.black.Brilliant + s.black.Perfect, '#9b59b6')}
+                    ${row('Good', s.white.Good, s.black.Good, '#2ecc71')}
+                    ${row('Inaccuracies', s.white.Inaccuracy, s.black.Inaccuracy, '#f1c40f')}
+                    ${row('Mistakes', s.white.Mistake, s.black.Mistake, '#e67e22')}
+                    ${row('Blunders', s.white.Blunder, s.black.Blunder, '#e74c3c')}
+                </table>
             `);
 
                     // Store moves globally for keyboard navigation
@@ -836,7 +1191,10 @@
 
                     if (window.analysisMoves.length > 0) {
                         setTimeout(() => { goToMove(0); }, 100);
+                    } else {
+                        refreshEngineLines();
                     }
+                    refreshAnalysisGraph();
                 })
                 .catch(err => {
                     console.error("Analysis failed:", err);
@@ -875,10 +1233,7 @@
                         window.treeInstance.focusNode('root');
                     }
                 }
-                var startFen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
-                if (window.analysisMoves && window.analysisMoves.length > 0 && window.analysisMoves[0].fen_before) {
-                    startFen = window.analysisMoves[0].fen_before;
-                }
+                var startFen = (analysisSummary && analysisSummary.start_fen) || "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
                 board.position(startFen);
                 game.load(startFen);
                 updateMaterialBar(0, false);
@@ -887,6 +1242,8 @@
                 
                 var container = $('#analysisDetails');
                 container.stop(true, true).animate({ scrollTop: 0 }, 100);
+                refreshAnalysisGraph();
+                refreshEngineLines();
                 return;
             }
 
@@ -943,39 +1300,19 @@
                     scrollTop: card.offset().top - container.offset().top + container.scrollTop() - 20
                 }, 100);
             }
+            refreshAnalysisGraph();
+            refreshEngineLines();
         }
 
         // --- KEYBOARD CONTROLS ---
         document.addEventListener('keydown', function (e) {
-            if ($('#analysisView').is(':visible')) {
-                var currentM = window.analysisMoves[window.currentMoveIndex];
-                
-                if (e.key === "ArrowRight" || e.key === "ArrowDown") {
-                    e.preventDefault(); 
-                    if (currentM) {
-                        // Find the first child of the current move
-                        var childIndex = window.analysisMoves.findIndex(m => m.parentId === currentM.id);
-                        if (childIndex !== -1) {
-                            goToMove(childIndex);
-                        }
-                    } else if (window.currentMoveIndex === -1 && window.analysisMoves.length > 0) {
-                        // From starting position, go to first move
-                        goToMove(0);
-                    }
-                } else if (e.key === "ArrowLeft" || e.key === "ArrowUp") {
-                    e.preventDefault();
-                    if (currentM && currentM.parentId) {
-                        // Go to parent move
-                        var parentIndex = window.analysisMoves.findIndex(m => m.id === currentM.parentId);
-                        if (parentIndex !== -1) {
-                            goToMove(parentIndex);
-                        }
-                    } else if (currentM && !currentM.parentId) {
-                        // Go to starting position
-                        goToMove(-1);
-                    }
-                }
-            }
+            if (!$('#analysisView').is(':visible')) return;
+            if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT')) return;
+            if (e.key === "ArrowRight" || e.key === "ArrowDown") { e.preventDefault(); navNext(); }
+            else if (e.key === "ArrowLeft" || e.key === "ArrowUp") { e.preventDefault(); navPrev(); }
+            else if (e.key === "Home") { e.preventDefault(); navFirst(); }
+            else if (e.key === "End") { e.preventDefault(); navLast(); }
+            else if (e.key === "f" || e.key === "F") { flipBoard(); }
         });
     </script>
 </body>
