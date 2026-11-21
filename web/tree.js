@@ -1,3 +1,6 @@
+// Vertical distance between consecutive moves in the tree, in px.
+var LEVEL_HEIGHT = 70;
+
 function CollapsibleTree (config) {
     this.config = config;
     this.defaultConfig = {
@@ -76,11 +79,11 @@ function CollapsibleTree (config) {
 
     this.focusNode = function(id) {
         if (!this.svg) return;
-        var nodes = this.tree.nodes(this.root);
+        // Use the positions the nodes were actually drawn at. Re-running the layout here
+        // (as before) squeezed all depths into the panel height instead of LEVEL_HEIGHT px
+        // per move, so the camera fell further behind the further into the game you went.
         var targetNode = null;
-        for (var i = 0; i < nodes.length; i++) {
-            if (nodes[i].id === id) { targetNode = nodes[i]; break; }
-        }
+        this.svg.selectAll("g.node").each(function(d) { if (d.id === id) targetNode = d; });
         if (!targetNode) return;
 
         var container = document.querySelector(this.config.appendSelector);
@@ -91,7 +94,7 @@ function CollapsibleTree (config) {
         var x = cw / 2 - (targetNode.x + this.config.marginLeft) * scale;
         var y = ch / 3 - (targetNode.y + this.config.marginTop) * scale;
 
-        d3.select(this.config.appendSelector + " .drawarea").transition().duration(400)
+        d3.select(this.config.appendSelector + " .drawarea").interrupt().transition().duration(200)
             .attr("transform", "translate(" + x + "," + y + ") scale(" + scale + ")");
         this.zoomListener.translate([x, y]);
     }.bind(this);
@@ -110,7 +113,7 @@ function CollapsibleTree (config) {
               i        = 0,
               duration = this.config.duration;
 
-          nodes.forEach(function(d) { d.y = d.depth * 100; }.bind(this));
+          nodes.forEach(function(d) { d.y = d.depth * LEVEL_HEIGHT; }.bind(this));
 
           var node = this.svg.selectAll("g.node")
                              .data(nodes, function(d) { return d.id || (d.id = ++i); });

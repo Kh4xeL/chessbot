@@ -56,6 +56,14 @@ def test_engine_move_and_tutor_lines_are_legal(client):
         assert chess.Move.from_uci(line["move"]) in after.legal_moves
 
 
+def test_tutor_lines_carry_final_evals(client):
+    r = post(client, "/get_move", fen=MIDDLEGAME, elo=3000, time_limit=500, use_book=False)
+    for line in r["top_3"]:
+        assert isinstance(line["eval_pawns"], float)
+    evals = [line["eval_pawns"] for line in r["top_3"]]
+    assert evals == sorted(evals, reverse=True)   # White to move: best line first
+
+
 def test_book_rules(client):
     assert post(client, "/get_move", fen=START, elo=2500, time_limit=300)["engine"] == "PolyGlot Book"
     assert post(client, "/get_move", fen=START, elo=1200, time_limit=300)["engine"] != "PolyGlot Book"
@@ -109,3 +117,14 @@ def test_analyze_pgn(client):
     pgn = "1. e4 e5 2. Nf3 Nc6 3. Bc4 Nd4 4. Nxe5 Qg5 5. Nxf7 Qxg2 6. Rf1 Qxe4+ 7. Be2 Nf3#"
     r = post(client, "/analyze", pgn=pgn)
     assert len(r["moves"]) == 14
+
+
+@needs_stockfish
+def test_analyze_position_lines(client):
+    fen = "r2q1rk1/pp2bppp/2n1bn2/3p4/3N4/2N1B3/PPP1BPPP/R2Q1RK1 b - - 4 10"
+    r = post(client, "/analyze_position", fen=fen, multipv=3, time_ms=300)
+    assert r["depth"] > 0 and len(r["lines"]) == 3
+    board = chess.Board(fen)
+    for line in r["lines"]:
+        assert chess.Move.from_uci(line["uci"][0]) in board.legal_moves
+        assert len(line["san"]) == len(line["uci"])
