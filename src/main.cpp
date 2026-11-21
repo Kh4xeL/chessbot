@@ -641,7 +641,17 @@ int depth_cap_for_elo(int elo) { return elo >= 2900 ? 99 : std::clamp((elo - 500
 
 size_t choose_move(const RootResult& r, int elo, std::mt19937& rng) {
     if (elo >= 2900 || r.moves.size() < 2) return 0;
-    const double temp = std::max(8.0, (2900.0 - elo) / 7.0);   // centipawns
+    // Sampling temperature in centipawns, interpolated between points calibrated with
+    // training/match.py against Stockfish's UCI_Elo (1400 and up; below that extrapolated).
+    static const double pts[][2] = {{800, 300}, {1400, 214}, {1800, 75}, {2200, 50}, {2600, 28}, {2900, 8}};
+    double temp = 300;
+    for (size_t i = 1; i < std::size(pts); i++) {
+        if (elo <= pts[i][0]) {
+            const double t = std::clamp((elo - pts[i - 1][0]) / (pts[i][0] - pts[i - 1][0]), 0.0, 1.0);
+            temp = pts[i - 1][1] + t * (pts[i][1] - pts[i - 1][1]);
+            break;
+        }
+    }
     const int best = r.moves[0].score;
     if (best >= MATE_BOUND && elo >= 1400) return 0;          // never miss a found mate above beginner level
     std::vector<double> w(r.moves.size(), 0.0);
