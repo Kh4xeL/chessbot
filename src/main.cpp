@@ -12,7 +12,7 @@
  * Usage:
  *   engine <fen> [elo] [max_depth] [time_ms]   one search, then exit
  *   engine --server                            read commands from stdin:
- *       go <elo> <max_depth> <time_ms> <fen>   prints the result block, then END
+ *       go <elo> <max_depth> <time_ms> <fen> [moves m1 m2 ...]   prints the result block, then END
  *       newgame                                clears the hash tables
  *       quit
  *   engine --selftest                          checks the CNN against PyTorch output
@@ -21,6 +21,7 @@
  * Output block (parsed by python/api.py):
  *   BEST_MOVE:e2e4
  *   EVAL:0.31                  (pawns, White's point of view)
+ *   MATE:3                     (only when a mate is found: mate in N, + = White mates)
  *   DEPTH_REACHED:14
  *   TUTOR_DATA:
  *   RANK:1|MOVE:e2e4|IDEA:e2e4 e7e5 g1f3 ...      (top 3 for the side to move)
@@ -494,9 +495,16 @@ std::string pv_string(const std::vector<Move>& pv, size_t max_len = 8) {
     return s;
 }
 
-void run_go(const std::string& fen, int elo, int max_depth, long long total_ms, std::ostream& out) {
+void run_go(const std::string& fen, const std::vector<std::string>& moves, int elo, int max_depth, long long total_ms,
+            std::ostream& out) {
     static std::mt19937 rng(static_cast<unsigned>(std::chrono::steady_clock::now().time_since_epoch().count()));
     Board board(fen);
+    // Replaying the game's moves gives the board its history, so the search sees repetitions.
+    for (const auto& u : moves) {
+        Move m = chess::uci::uciToMove(board, u);
+        if (m == Move(Move::NO_MOVE)) break;
+        board.makeMove(m);
+    }
     Movelist legal;
     chess::movegen::legalmoves(legal, board);
     if (legal.empty()) {
@@ -525,6 +533,11 @@ void run_go(const std::string& fen, int elo, int max_depth, long long total_ms, 
     // If time ran out before depth 1 finished there are no scores; report the static eval.
     const int eval_stm = r.depth > 0 ? chosen.score : S.nn.evaluate(board);
     out << "EVAL:" << to_white_pawns(eval_stm) << "\n";
+    if (std::abs(eval_stm) >= MATE_BOUND) {
+        // Mate in N full moves, positive when White is the one mating.
+        const int n = (MATE - std::abs(eval_stm) + 1) / 2;
+        out << "MATE:" << (((eval_stm > 0) == white) ? n : -n) << "\n";
+    }
     out << "DEPTH_REACHED:" << r.depth << "\n";
     out << "TUTOR_DATA:\n";
     for (size_t i = 0; i < r.moves.size() && i < 3; i++) {
@@ -658,11 +671,20 @@ int main(int argc, char* argv[]) {
                 int elo = 3000, depth = 99;
                 long long ms = 3000;
                 ss >> elo >> depth >> ms;
-                std::string fen;
-                std::getline(ss, fen);
+                // Rest of the line: "<fen> [moves m1 m2 ...]"
+                std::string rest;
+                std::getline(ss, rest);
+                std::string fen = rest;
+                std::vector<std::string> moves;
+                const auto mpos = rest.find(" moves");
+                if (mpos != std::string::npos) {
+                    fen = rest.substr(0, mpos);
+                    std::istringstream ms_in(rest.substr(mpos + 6));
+                    for (std::string u; ms_in >> u;) moves.push_back(u);
+                }
                 fen.erase(0, fen.find_first_not_of(' '));
                 try {
-                    run_go(fen, elo, depth, ms, std::cout);
+                    run_go(fen, moves, elo, depth, ms, std::cout);
                 } catch (const std::exception& e) {
                     std::cout << "ERROR:" << e.what() << "\nEND" << std::endl;
                 }
@@ -678,6 +700,6 @@ int main(int argc, char* argv[]) {
     const int elo = argc >= 3 ? static_cast<int>(std::stof(argv[2])) : 3000;
     const int depth = argc >= 4 ? std::stoi(argv[3]) : 99;
     const long long ms = argc >= 5 ? std::stoll(argv[4]) : 3000;
-    run_go(fen, elo, depth, ms, std::cout);
+    run_go(fen, {}, elo, depth, ms, std::cout);
     return 0;
 }

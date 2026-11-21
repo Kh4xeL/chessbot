@@ -6,6 +6,7 @@ It handles opening book lookups, formats engine data, and generates human-readab
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
+from typing import List, Optional
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -33,6 +34,13 @@ class MoveRequest(BaseModel):
     elo: int = 2500         # >= 2900 means full strength; lower Elo caps depth and adds human-like choice
     depth: int = 99         # maximum search depth (the time limit usually stops it first)
     time_limit: int = 3000  # Time limit in milliseconds
+    start_fen: Optional[str] = None  # game start position; with `moves` it lets the engine see repetitions
+    moves: List[str] = []            # UCI moves played from start_fen up to `fen`
+    use_book: bool = True            # tutor hints turn this off so they always get engine analysis
+
+
+# The opening book is master-level; below this Elo the bot plays its own (weaker) moves.
+BOOK_MIN_ELO = 1800
 
 # --- Path Resolution ---
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -104,6 +112,15 @@ class EngineProcess:
                 self.close()
                 return self._go_locked(fen, elo, depth, time_ms)  # one retry with a fresh process
 
+    def newgame(self):
+        """Clears the engine's hash table between games."""
+        with self.lock:
+            if self.proc is None or self.proc.poll() is not None:
+                return
+            self.proc.stdin.write("newgame\n")
+            self.proc.stdin.flush()
+            self.proc.stdout.readline()  # "OK"
+
     def close(self):
         if self.proc is not None:
             try:
@@ -115,6 +132,13 @@ class EngineProcess:
 
 ENGINE = EngineProcess(ENGINE_PATH)
 atexit.register(ENGINE.close)
+
+
+def position_string(fen, start_fen=None, moves=None):
+    """FEN alone, or start FEN + moves so the engine knows the game history (repetitions)."""
+    if start_fen and moves:
+        return f"{start_fen} moves {' '.join(moves)}"
+    return fen
 
 
 def engine_best_move(fen, elo, depth, time_ms):
@@ -137,6 +161,14 @@ def annotate_tutor_moves(board: chess.Board, tutor_moves: list) -> None:
             m = chess.Move.from_uci(tutor["move"])
             tags = []
 
+            # A mating move needs no other label (its "sacrifice" can't be recaptured).
+            board.push(m)
+            mates = board.is_checkmate()
+            board.pop()
+            if mates:
+                tutor["tactics"] = "🏆 Checkmate!"
+                continue
+
             # Motif A: Capture & Trade Detection
             if board.is_capture(m):
                 victim = board.piece_at(m.to_square)
@@ -144,7 +176,9 @@ def annotate_tutor_moves(board: chess.Board, tutor_moves: list) -> None:
 
                 if victim and attacker:
                     board.push(m)
-                    is_recaptured = board.is_attacked_by(board.turn, m.to_square)
+                    # Only a legal recapture counts (a pinned piece or the king walking
+                    # into a defended square can't take back).
+                    is_recaptured = any(r.to_square == m.to_square for r in board.legal_moves)
                     board.pop()
 
                     v_type = victim.piece_type
@@ -166,9 +200,7 @@ def annotate_tutor_moves(board: chess.Board, tutor_moves: list) -> None:
 
             # Motif B: Check / Mate
             board.push(m)
-            if board.is_checkmate():
-                tags.append("🏆 Checkmate!")
-            elif board.is_check():
+            if board.is_check():
                 tags.append("🎯 Delivers Check")
 
             # Motif C: Fork / Double Attack
@@ -203,9 +235,10 @@ def calculate_move(request: MoveRequest):
     """
     board = chess.Board(request.fen)
 
-    # 1. Opening Book Lookup (Zero calculation cost)
+    # 1. Opening Book Lookup (Zero calculation cost). Skipped for tutor hints (they need the
+    # engine's top moves) and for weak bot settings (book moves are master-level).
     try:
-        if os.path.exists(BOOK_PATH):
+        if request.use_book and request.elo >= BOOK_MIN_ELO and os.path.exists(BOOK_PATH):
             with chess.polyglot.open_reader(BOOK_PATH) as reader:
                 start_time = time.time()
                 book_move = reader.choice(board).move
@@ -225,12 +258,14 @@ def calculate_move(request: MoveRequest):
     try:
         # 2. Ask the persistent C++ engine
         start_time = time.time()
-        engine_output = ENGINE.go(request.fen, request.elo, request.depth, request.time_limit)
+        position = position_string(request.fen, request.start_fen, request.moves)
+        engine_output = ENGINE.go(position, request.elo, request.depth, request.time_limit)
         end_time = time.time()
         calculation_time = round(end_time - start_time, 2)
 
         best_move = None
         eval_score = 0.0
+        mate_in = None
         depth_reached = 0
         top_moves = []
         user_top_moves = []
@@ -250,6 +285,11 @@ def calculate_move(request: MoveRequest):
                     eval_score = float(line.split(":")[1].strip())
                 except ValueError:
                     eval_score = 0.0
+            elif line.startswith("MATE:"):
+                try:
+                    mate_in = int(line.split(":")[1].strip())
+                except ValueError:
+                    mate_in = None
             elif line.startswith("DEPTH_REACHED:"):
                 try:
                     depth_reached = int(line.split(":")[1].strip())
@@ -306,6 +346,7 @@ def calculate_move(request: MoveRequest):
                 "depth": request.depth,
                 "depth_reached": depth_reached,
                 "eval_pawns": eval_score,
+                "mate": mate_in,  # mate in N moves (+ White mates, - Black mates), else None
                 "time": calculation_time,
                 "top_3": top_moves,
                 "user_top_3": user_top_3,
@@ -358,6 +399,15 @@ def check_threats(request: ThreatRequest):
 
             is_threat = False
             threat_msg = ""
+
+            # --- STEP 0: Mate threat (checked first: it outranks any material threat) ---
+            threat_san = board.san(m)
+            board.push(m)
+            mates = board.is_checkmate()
+            board.pop()
+            if mates:
+                return {"threat": f"☠️ MATE THREAT! If you ignore it, opponent plays {threat_san} and it's checkmate!",
+                        "hint": hint_move_uci, "is_threat": True, "threat_move": threat_move_uci}
 
             # --- STEP A: Immediate Capture (What dies right now?) ---
             immediate_victim = board.piece_at(m.to_square) if board.is_capture(m) else None
@@ -419,8 +469,19 @@ def check_threats(request: ThreatRequest):
         return {"threat": "Could not analyze threats.", "hint": None, "is_threat": False, "threat_move": None}
 
 
+@app.post("/new_game")
+def new_game():
+    """Clears the engine's hash table so a new game starts from a clean slate."""
+    try:
+        ENGINE.newgame()
+    except (RuntimeError, OSError):
+        pass
+    return {"ok": True}
+
+
 from .semantic_analysis import analyze_pgn as _analyze_pgn
 from pydantic import BaseModel
+from typing import List, Optional
 
 class AnalyzeRequest(BaseModel):
     pgn: str
