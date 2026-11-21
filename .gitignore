@@ -2,7 +2,7 @@
 .idea/
 .vscode/
 
-# Build Folders (The most important ones to ignore!)
+# Build Folders
 build/
 cmake-build-*/
 bin/
@@ -27,3 +27,10 @@ engine
 assets/main.py
 assets/converter.py
 assets/alphazero_chess_bot.pth
+# Windows venv, training data, downloaded tools
+.venv-win/
+data/
+tools/
+cmake-build-*/
+.cache/
+.claude/

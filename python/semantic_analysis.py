@@ -20,7 +20,20 @@ import matplotlib.patches as mpatches
 # ─────────────────────────────────────────────
 # CONFIG
 # ─────────────────────────────────────────────
-STOCKFISH_PATH    = "/opt/homebrew/bin/stockfish"
+def _find_stockfish():
+    """STOCKFISH_PATH env var, then PATH, then tools/ (Windows download), then Homebrew."""
+    import glob, os, shutil
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    candidates = [os.environ.get("STOCKFISH_PATH"), shutil.which("stockfish")]
+    candidates += sorted(glob.glob(os.path.join(root, "tools", "**", "stockfish*.exe"), recursive=True))
+    candidates += ["/opt/homebrew/bin/stockfish", "/usr/local/bin/stockfish", "/usr/games/stockfish"]
+    for c in candidates:
+        if c and os.path.isfile(c):
+            return c
+    return "stockfish"
+
+
+STOCKFISH_PATH    = _find_stockfish()
 ANALYSIS_TIME     = 0.05
 EVAL_CAP          = 1000
 

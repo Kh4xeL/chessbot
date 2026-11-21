@@ -265,7 +265,7 @@
                 <button class="back-btn" onclick="showStartPage()">← Back to Start</button>
             </div>
             <div class="controls">
-                <label>Engine Depth: <input type="number" id="depthInput" value="5" min="1" max="12"
+                <label>Max Depth: <input type="number" id="depthInput" value="30" min="1" max="60"
                         style="width: 50px;"></label>
                 <label>AI Elo:
                     <input type="range" id="eloInput" min="800" max="3000" value="2500" step="100"
@@ -453,7 +453,8 @@
             fetch('/get_move', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ fen: game.fen(), elo: currentElo, depth: 5, time_limit: 3000 })
+                // Tutor hints always come from the full-strength engine, whatever the bot's Elo.
+                body: JSON.stringify({ fen: game.fen(), elo: 3000, depth: 99, time_limit: 2000 })
             })
                 .then(response => response.json())
                 .then(data => {
@@ -493,12 +494,12 @@
             if (game.game_over()) return;
             $move.hide();
             $thinking.show();
-            var customDepth = parseInt(document.getElementById('depthInput').value) || 5;
+            var customDepth = parseInt(document.getElementById('depthInput').value) || 30;
             var currentElo = parseInt(document.getElementById('eloInput').value) || 2500;
             fetch('/get_move', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ fen: game.fen(), elo: currentElo, depth: customDepth, time_limit: 8000 })
+                body: JSON.stringify({ fen: game.fen(), elo: currentElo, depth: customDepth, time_limit: 3000 })
             })
                 .then(response => response.json())
                 .then(data => {
