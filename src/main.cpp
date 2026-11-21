@@ -172,6 +172,72 @@ struct Search {
         return v[static_cast<int>(pt)];
     }
 
+    // Static exchange evaluation: does the capture sequence on m's target square,
+    // with both sides always recapturing with their cheapest piece, gain at least
+    // `threshold` centipawns? (Pins are ignored, as in most engines.)
+    static bool see_ge(const Board& b, const Move& m, int threshold) {
+        if (m.typeOf() != Move::NORMAL) return 0 >= threshold;
+        using chess::PieceType;
+        const chess::Square to = m.to();
+        int swap = piece_value(b.at<PieceType>(to)) - threshold;
+        if (swap < 0) return false;
+        swap = piece_value(b.at<PieceType>(m.from())) - swap;
+        if (swap <= 0) return true;
+
+        const std::uint64_t pawns = b.pieces(PieceType::PAWN).getBits();
+        const std::uint64_t knights = b.pieces(PieceType::KNIGHT).getBits();
+        const std::uint64_t bishops = b.pieces(PieceType::BISHOP).getBits();
+        const std::uint64_t rooks = b.pieces(PieceType::ROOK).getBits();
+        const std::uint64_t queens = b.pieces(PieceType::QUEEN).getBits();
+        const std::uint64_t kings = b.pieces(PieceType::KING).getBits();
+        const std::uint64_t diag = bishops | queens, ortho = rooks | queens;
+
+        std::uint64_t occ = b.occ().getBits() ^ (1ULL << m.from().index()) ^ (1ULL << to.index());
+        std::uint64_t attackers =
+            (chess::attacks::pawn(chess::Color::BLACK, to).getBits() & pawns & b.us(chess::Color::WHITE).getBits()) |
+            (chess::attacks::pawn(chess::Color::WHITE, to).getBits() & pawns & b.us(chess::Color::BLACK).getBits()) |
+            (chess::attacks::knight(to).getBits() & knights) |
+            (chess::attacks::bishop(to, occ).getBits() & diag) |
+            (chess::attacks::rook(to, occ).getBits() & ortho) |
+            (chess::attacks::king(to).getBits() & kings);
+
+        chess::Color stm = b.sideToMove();
+        int res = 1;
+        while (true) {
+            stm = ~stm;
+            attackers &= occ;
+            const std::uint64_t mine = attackers & b.us(stm).getBits();
+            if (!mine) break;
+            res ^= 1;
+            std::uint64_t bb;
+            if ((bb = mine & pawns)) {
+                if ((swap = 100 - swap) < res) break;
+                occ ^= bb & (~bb + 1);
+                attackers |= chess::attacks::bishop(to, occ).getBits() & diag;
+            } else if ((bb = mine & knights)) {
+                if ((swap = 320 - swap) < res) break;
+                occ ^= bb & (~bb + 1);
+            } else if ((bb = mine & bishops)) {
+                if ((swap = 330 - swap) < res) break;
+                occ ^= bb & (~bb + 1);
+                attackers |= chess::attacks::bishop(to, occ).getBits() & diag;
+            } else if ((bb = mine & rooks)) {
+                if ((swap = 500 - swap) < res) break;
+                occ ^= bb & (~bb + 1);
+                attackers |= chess::attacks::rook(to, occ).getBits() & ortho;
+            } else if ((bb = mine & queens)) {
+                if ((swap = 900 - swap) < res) break;
+                occ ^= bb & (~bb + 1);
+                attackers |= (chess::attacks::bishop(to, occ).getBits() & diag) |
+                             (chess::attacks::rook(to, occ).getBits() & ortho);
+            } else {
+                // King "captures": only legal if the other side has no attackers left.
+                return (attackers & ~b.us(stm).getBits()) ? (res ^ 1) : res;
+            }
+        }
+        return res;
+    }
+
     int score_move(const Board& b, const Move& m, std::uint16_t tt_move, int ply) const {
         if (m.move() == tt_move) return 10'000'000;
         const bool promo = m.typeOf() == Move::PROMOTION;
@@ -179,7 +245,9 @@ struct Search {
             auto victim = m.typeOf() == Move::ENPASSANT ? chess::PieceType(chess::PieceType::PAWN)
                                                          : b.at<chess::PieceType>(m.to());
             auto attacker = b.at<chess::PieceType>(m.from());
-            return 1'000'000 + piece_value(victim) * 10 - static_cast<int>(attacker) + (promo ? 5000 : 0);
+            const int mvv_lva = piece_value(victim) * 10 - static_cast<int>(attacker) + (promo ? 5000 : 0);
+            // Captures that lose material (by SEE) go after the killers and good quiets.
+            return (see_ge(b, m, 0) ? 1'000'000 : -500'000) + mvv_lva;
         }
         if (promo) return m.promotionType() == chess::PieceType::QUEEN ? 950'000 : -100'000;
         if (ply < MAX_PLY) {
@@ -234,6 +302,8 @@ struct Search {
                 auto victim = m.typeOf() == Move::ENPASSANT ? chess::PieceType(chess::PieceType::PAWN)
                                                              : b.at<chess::PieceType>(m.to());
                 if (stand + piece_value(victim) + 200 < alpha) continue;
+                // Losing captures can't improve a quiet position.
+                if (!see_ge(b, m, 0)) continue;
             }
             make(b, m);
             int s = -qsearch(b, -beta, -alpha, ply + 1);
@@ -326,6 +396,11 @@ struct Search {
             // Late move pruning: at shallow depth skip late quiet moves outright.
             if (!pv_node && !in_check && quiet && best > -MATE_BOUND && depth <= 3 &&
                 searched >= 4 + depth * depth * 2)
+                continue;
+
+            // SEE pruning: at shallow depth skip moves that lose too much material outright.
+            if (!pv_node && !in_check && searched > 0 && best > -MATE_BOUND && depth <= 6 &&
+                !see_ge(b, m, quiet ? -60 * depth : -100 * depth))
                 continue;
 
             make(b, m);
@@ -448,7 +523,19 @@ RootResult iterate(Search& T, Board board, std::vector<RootMove> rms, int max_de
             int alpha = static_cast<int>(exact_scores.size()) >= K ? exact_scores[K - 1] : -INF;
             T.make(board, rm.move);
             int s;
-            if (alpha == -INF) {
+            if (alpha == -INF && depth >= 5 && rm.exact && std::abs(rm.score) < MATE_BOUND) {
+                // Aspiration window around last iteration's score; widen on a fail.
+                int delta = 25, lo = rm.score - delta, hi = rm.score + delta;
+                while (true) {
+                    s = -T.negamax(board, depth - 1, -hi, -lo, 1, true);
+                    if (T.stop) break;
+                    if (s > lo && s < hi) break;
+                    delta *= 2;
+                    if (delta > 400) { lo = -INF; hi = INF; continue; }
+                    if (s <= lo) lo = std::max(-INF, s - delta);
+                    else hi = std::min(INF, s + delta);
+                }
+            } else if (alpha == -INF) {
                 s = -T.negamax(board, depth - 1, -INF, INF, 1, true);
             } else {
                 s = -T.negamax(board, depth - 1, -alpha - 1, -alpha, 1, true);
