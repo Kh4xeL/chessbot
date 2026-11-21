@@ -8,6 +8,7 @@ Dependencies:
 """
 
 import atexit
+import os
 import contextlib
 import threading
 import chess
@@ -50,6 +51,7 @@ def shared_stockfish():
     with _SF_LOCK:
         if _SF is None:
             _SF = chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH)
+            _SF.configure({"Threads": SF_THREADS, "Hash": 256})
         try:
             yield _SF
         except (chess.engine.EngineError, chess.engine.EngineTerminatedError):
@@ -69,6 +71,7 @@ def _close_stockfish():
         except Exception:
             pass
 ANALYSIS_TIME     = 0.05
+SF_THREADS        = int(os.environ.get("STOCKFISH_THREADS", "4"))
 EVAL_CAP          = 1000
 
 BLUNDER_THRESHOLD    = 200
@@ -316,6 +319,7 @@ def analyze_pgn(pgn_string):
         # Analyze the starting position to get the very first prev_score_cp
         start_info = engine.analyse(board, chess.engine.Limit(time=ANALYSIS_TIME))
         prev_score_cp = clamp(start_info["score"].white().score(mate_score=10000), -EVAL_CAP, EVAL_CAP)
+        start_eval_cp = prev_score_cp
 
         for i, node in enumerate(move_nodes):
             move        = node.move
@@ -417,7 +421,9 @@ def analyze_pgn(pgn_string):
                 "move_number"   : move_number,
                 "color"         : color_name,
                 "san"           : move_san,
+                "uci"           : move.uci(),
                 "from_sq"       : chess.square_name(move.from_square),
+                "fen_before"    : board_before.fen(),
                 "to_sq"         : chess.square_name(move.to_square),
                 "fen_after"     : board.fen(),
                 "eval_cp"       : curr_score_cp,
@@ -454,6 +460,9 @@ def analyze_pgn(pgn_string):
             "white"         : white_stats,
             "black"         : black_stats,
             "final_eval_cp" : results[-1]["eval_cp"] if results else 0,
+            "start_fen"     : game.board().fen(),
+            "start_eval_cp" : start_eval_cp,
+            "headers"       : dict(game.headers),
         }
     }
 

@@ -26,7 +26,8 @@
  *   MATE:3                     (only when a mate is found: mate in N, + = White mates)
  *   DEPTH_REACHED:14
  *   TUTOR_DATA:
- *   RANK:1|MOVE:e2e4|IDEA:e2e4 e7e5 g1f3 ...      (top 3 for the side to move)
+ *   RANK:1|MOVE:e2e4|IDEA:e2e4 e7e5 g1f3 ...|EVAL:0.31[|MATE:n]   (top 3 for the side to move;
+ *                                                  EVAL = line's final evaluation, White's view)
  *   USER_TUTOR_DATA:
  *   USER_RANK:1|MOVE:...|IDEA:...                 (top 3 replies after BEST_MOVE)
  */
@@ -723,11 +724,27 @@ void run_go(const std::string& fen, const std::vector<std::string>& moves, int e
         out << "MATE:" << (((eval_stm > 0) == white) ? n : -n) << "\n";
     }
     out << "DEPTH_REACHED:" << r.depth << "\n";
+
+    // "|EVAL:<pawns, White's view>[|MATE:<n>]" for a line's final evaluation; only exact scores.
+    auto line_eval = [](const RootMove& m, bool white_to_move) {
+        if (!m.exact || m.score <= -INF) return std::string();
+        std::ostringstream os;
+        int s = m.score;
+        if (s >= MATE_BOUND) s = 10000;
+        if (s <= -MATE_BOUND) s = -10000;
+        os << "|EVAL:" << (white_to_move ? s : -s) / 100.0;
+        if (std::abs(m.score) >= MATE_BOUND) {
+            const int n = (MATE - std::abs(m.score) + 1) / 2;
+            os << "|MATE:" << (((m.score > 0) == white_to_move) ? n : -n);
+        }
+        return os.str();
+    };
+
     out << "TUTOR_DATA:\n";
     for (size_t i = 0; i < r.moves.size() && i < 3; i++) {
         const RootMove& m = r.moves[i];
         out << "RANK:" << i + 1 << "|MOVE:" << chess::uci::moveToUci(m.move)
-            << "|IDEA:" << pv_string(m.pv.empty() ? std::vector<Move>{m.move} : m.pv) << "\n";
+            << "|IDEA:" << pv_string(m.pv.empty() ? std::vector<Move>{m.move} : m.pv) << line_eval(m, white) << "\n";
     }
 
     // Top replies for the human, on the position after the bot's move.
@@ -738,7 +755,8 @@ void run_go(const std::string& fen, const std::vector<std::string>& moves, int e
     for (size_t i = 0; i < u.moves.size() && i < 3; i++) {
         const RootMove& m = u.moves[i];
         out << "USER_RANK:" << i + 1 << "|MOVE:" << chess::uci::moveToUci(m.move)
-            << "|IDEA:" << pv_string(m.pv.empty() ? std::vector<Move>{m.move} : m.pv) << "\n";
+            << "|IDEA:" << pv_string(m.pv.empty() ? std::vector<Move>{m.move} : m.pv) << line_eval(m, !white)
+            << "\n";
     }
     out << "END" << std::endl;
 

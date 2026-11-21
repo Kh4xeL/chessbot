@@ -15,6 +15,7 @@ import queue
 import subprocess
 import threading
 import chess
+import chess.engine
 import chess.polyglot
 import os
 import time
@@ -169,6 +170,20 @@ def position_string(fen, start_fen=None, moves=None):
     if start_fen and moves:
         return f"{start_fen} moves {' '.join(moves)}"
     return fen
+
+
+def parse_rank_line(line):
+    """'RANK:1|MOVE:e2e4|IDEA:e2e4 e7e5|EVAL:0.31|MATE:2' -> dict. EVAL (the line's final
+    evaluation, White's view) and MATE are only present when the engine has an exact score."""
+    fields = dict(part.split(":", 1) for part in line.split("|") if ":" in part)
+    rank_key = "USER_RANK" if "USER_RANK" in fields else "RANK"
+    try:
+        entry = {"rank": int(fields[rank_key]), "move": fields["MOVE"], "idea": fields.get("IDEA", "")}
+    except (KeyError, ValueError):
+        return None
+    entry["eval_pawns"] = float(fields["EVAL"]) if "EVAL" in fields else None
+    entry["mate"] = int(fields["MATE"]) if "MATE" in fields else None
+    return entry
 
 
 def engine_best_move(fen, elo, depth, time_ms):
@@ -326,28 +341,13 @@ def calculate_move(request: MoveRequest):
                 except ValueError:
                     depth_reached = 0
             elif line.startswith("RANK:"):
-                parts = line.split("|")
-                if len(parts) == 3:
-                    rank = parts[0].split(":")[1]
-                    move = parts[1].split(":")[1]
-                    idea = parts[2].split(":")[1]
-
-                    top_moves.append({
-                        "rank": int(rank),
-                        "move": move,
-                        "idea": idea
-                    })
+                entry = parse_rank_line(line)
+                if entry:
+                    top_moves.append(entry)
             elif line.startswith("USER_RANK:"):
-                parts = line.split("|")
-                if len(parts) == 3:
-                    rank = parts[0].split(":")[1]
-                    move = parts[1].split(":")[1]
-                    idea = parts[2].split(":")[1]
-                    user_top_moves.append({
-                        "rank": int(rank),
-                        "move": move,
-                        "idea": idea
-                    })
+                entry = parse_rank_line(line)
+                if entry:
+                    user_top_moves.append(entry)
 
         # --- 4. TACTICAL MOTIF ANNOTATOR (Python Logic Layer) ---
         # Annotates each tutor entry with emoji tags (capture/check/fork/etc.)
@@ -509,6 +509,55 @@ def new_game():
     return {"ok": True}
 
 
+class PositionRequest(BaseModel):
+    fen: str
+    multipv: int = 3
+    time_ms: int = 800
+
+
+@app.post("/analyze_position")
+def analyze_position(request: PositionRequest):
+    """Live Stockfish analysis of one position for the analysis board: search depth plus the
+    top lines (SAN and UCI) with their evaluations, like the engine panel on chess.com."""
+    from .semantic_analysis import shared_stockfish
+    try:
+        board = chess.Board(request.fen)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if board.is_game_over():
+        return {"depth": 0, "lines": [], "game_over": True}
+    multipv = max(1, min(5, request.multipv))
+    time_s = max(0.05, min(5.0, request.time_ms / 1000))
+    try:
+        with shared_stockfish() as sf:
+            infos = sf.analyse(board, chess.engine.Limit(time=time_s), multipv=multipv)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Stockfish error: {e}")
+    if isinstance(infos, dict):
+        infos = [infos]
+    lines, depth = [], 0
+    for info in infos:
+        pv = info.get("pv", [])
+        if not pv:
+            continue
+        depth = max(depth, info.get("depth", 0))
+        score = info["score"].white()
+        mate = score.mate()
+        b = board.copy()
+        san = []
+        for mv in pv[:12]:
+            san.append(b.san(mv))
+            b.push(mv)
+        lines.append({
+            "uci": [m.uci() for m in pv[:12]],
+            "san": san,
+            "eval_pawns": round(score.score(mate_score=10000) / 100, 2),
+            "mate": mate,
+        })
+    return {"depth": depth, "lines": lines, "game_over": False,
+            "nodes": infos[0].get("nodes") if infos else None}
+
+
 from .semantic_analysis import analyze_pgn as _analyze_pgn
 from pydantic import BaseModel
 from typing import List, Optional
@@ -534,7 +583,6 @@ class ExploreRequest(BaseModel):
 
 @app.post("/explore_move")
 def explore_move(request: ExploreRequest):
-    import chess.engine
     from .semantic_analysis import shared_stockfish, clamp, EVAL_CAP, classify_move
     
     try:
