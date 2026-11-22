@@ -188,6 +188,7 @@ struct Search {
         int piece = -1;   // piece moved at this ply (-1: none / null move)
         int to = 0;
         int eval = -INF;  // static eval at this ply (-INF when in check)
+        std::uint16_t excluded = 0;   // move skipped by a singular-extension search
     };
     Frame ss[MAX_PLY + 4];
     Move pv[MAX_PLY][MAX_PLY];
@@ -420,11 +421,13 @@ struct Search {
 
         const bool pv_node = beta - alpha > 1;
         const std::uint64_t key = b.zobrist();
+        const std::uint16_t excluded = ss[ply].excluded;
         TTData tte;
         std::uint16_t tt_move = 0;
-        if (tt_probe(key, tte)) {
+        const bool tt_hit = tt_probe(key, tte);
+        if (tt_hit) {
             tt_move = tte.move;
-            if (!pv_node && tte.depth >= depth) {
+            if (!pv_node && !excluded && tte.depth >= depth) {
                 int s = score_from_tt(tte.score, ply);
                 if (tte.bound == BOUND_EXACT || (tte.bound == BOUND_LOWER && s >= beta) ||
                     (tte.bound == BOUND_UPPER && s <= alpha))
@@ -462,7 +465,7 @@ struct Search {
             // zugzwang is common and "passing" would wrongly look safe (e.g. Morphy's Ra6!).
             const int npm = 3 * (b.pieces(chess::PieceType::KNIGHT, stm).count() + b.pieces(chess::PieceType::BISHOP, stm).count()) +
                             5 * b.pieces(chess::PieceType::ROOK, stm).count() + 9 * b.pieces(chess::PieceType::QUEEN, stm).count();
-            if (allow_null && depth >= 3 && static_eval >= beta && npm >= 5) {
+            if (allow_null && !excluded && depth >= 3 && static_eval >= beta && npm >= 5) {
                 const int R = 3 + depth / 4;
                 ss[ply].piece = -1;
                 nn.push_null();
@@ -478,9 +481,26 @@ struct Search {
         Movelist moves;
         chess::movegen::legalmoves(moves, b);
         if (moves.empty()) return in_check ? -MATE + ply : 0;
+        if (excluded && moves.size() == 1) return alpha;   // the only move is excluded: nothing else to try
 
         int scores[256];
         for (int i = 0; i < moves.size(); i++) scores[i] = score_move(b, moves[i], tt_move, ply);
+
+        // Singular extension: if the hash move is much better than every alternative
+        // (searched at reduced depth with it excluded), search it one ply deeper. If even
+        // the alternatives beat beta, this node fails high without searching further.
+        int singular_ext = 0;
+        if (ply > 0 && depth >= 8 && tt_hit && tt_move && !excluded && tte.depth >= depth - 3 &&
+            tte.bound != BOUND_UPPER && std::abs(tte.score) < TB_BOUND) {
+            const int tt_score = score_from_tt(tte.score, ply);
+            const int sbeta = tt_score - 2 * depth;
+            ss[ply].excluded = tt_move;
+            const int v = negamax(b, (depth - 1) / 2, sbeta - 1, sbeta, ply, false);
+            ss[ply].excluded = 0;
+            if (stop) return 0;
+            if (v < sbeta) singular_ext = 1;
+            else if (sbeta >= beta) return sbeta;
+        }
 
         const int c = stm == chess::Color::WHITE ? 0 : 1;
         int best = -INF;
@@ -493,7 +513,9 @@ struct Search {
         for (int i = 0; i < moves.size(); i++) {
             pick(moves, scores, i);
             const Move m = moves[i];
+            if (m.move() == excluded) continue;
             const bool quiet = !b.isCapture(m) && m.typeOf() != Move::PROMOTION;
+            const int ext = (m.move() == tt_move) ? singular_ext : 0;
 
             // Late move pruning: at shallow depth skip late quiet moves outright.
             if (!pv_node && !in_check && quiet && best > -MATE_BOUND && depth <= 3 &&
@@ -511,7 +533,7 @@ struct Search {
             const bool gives_check = b.inCheck();
             int s;
             if (searched == 0) {
-                s = -negamax(b, depth - 1, -beta, -alpha, ply + 1, true);
+                s = -negamax(b, depth - 1 + ext, -beta, -alpha, ply + 1, true);
             } else {
                 int R = 0;
                 if (depth >= 3 && searched >= (pv_node ? 3 : 2) && quiet && !in_check && !gives_check) {
@@ -522,8 +544,8 @@ struct Search {
                     R = std::clamp(R, 0, depth - 2);
                 }
                 s = -negamax(b, depth - 1 - R, -alpha - 1, -alpha, ply + 1, true);
-                if (s > alpha && R > 0) s = -negamax(b, depth - 1, -alpha - 1, -alpha, ply + 1, true);
-                if (s > alpha && s < beta) s = -negamax(b, depth - 1, -beta, -alpha, ply + 1, true);
+                if (s > alpha && R > 0) s = -negamax(b, depth - 1 + ext, -alpha - 1, -alpha, ply + 1, true);
+                if (s > alpha && s < beta) s = -negamax(b, depth - 1 + ext, -beta, -alpha, ply + 1, true);
             }
             unmake(b, m);
             if (stop) return 0;
@@ -563,8 +585,9 @@ struct Search {
             }
         }
 
+        if (best == -INF) return alpha;   // every move skipped (excluded / pruned)
         const Bound bound = best >= beta ? BOUND_LOWER : (best > orig_alpha ? BOUND_EXACT : BOUND_UPPER);
-        tt_store(key, score_to_tt(best, ply), best_move.move(), depth, bound);
+        if (!excluded) tt_store(key, score_to_tt(best, ply), best_move.move(), depth, bound);
         return best;
     }
 };
