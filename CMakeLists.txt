@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.14 FATAL_ERROR)
-project(HybridChessEngine CXX)
+project(HybridChessEngine C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -13,6 +13,21 @@ option(ENGINE_NATIVE "Optimise for the CPU that builds the engine" ON)
 
 # No LibTorch any more: the NNUE and the CNN policy are evaluated in plain C++.
 add_executable(engine src/main.cpp)
+
+# Fathom: Syzygy tablebase probing (MIT, include/fathom).
+add_library(fathom STATIC include/fathom/tbprobe.c)
+set_target_properties(fathom PROPERTIES C_STANDARD 11)
+# Fathom includes <tbconfig.h> with angle brackets.
+target_include_directories(fathom PUBLIC include/fathom)
+if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(fathom PRIVATE -O3 -w)
+    if(ENGINE_NATIVE)
+        target_compile_options(fathom PRIVATE -march=native)
+    elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64")
+        target_compile_options(fathom PRIVATE -march=x86-64-v3)
+    endif()
+endif()
+target_link_libraries(engine PRIVATE fathom)
 
 find_package(Threads REQUIRED)
 target_link_libraries(engine PRIVATE Threads::Threads)

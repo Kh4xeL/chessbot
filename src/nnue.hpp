@@ -1,26 +1,29 @@
 #pragma once
 /**
- * NNUE evaluator ("768 -> 2xH -> 1", SCReLU).
+ * NNUE evaluator (format "NNU2", trained by training/train_nnue.py).
  *
- * Trained by training/train_nnue.py on Stockfish evaluations from the Lichess
- * evaluation database. Replaces the old CNN at the leaves of the search: the CNN
- * cost ~1.5 ms per position, this costs about a microsecond.
+ *   feature transformer: king-bucketed piece-square inputs -> H (int16, x QA)
+ *   output:              SCReLU(concat(us, them)) -> 1, one of n_ob output buckets
+ *                        chosen by the number of pieces on the board
  *
- * Feature index for a piece of color c, type t (pawn..king = 0..5) on square s
- * (a1 = 0), seen from perspective p:
- *     white perspective: c * 384 + t * 64 + s
- *     black perspective: (1 - c) * 384 + t * 64 + (s ^ 56)    (board mirrored)
+ * Each perspective (White's, Black's) sees the board from its own side (Black's
+ * view is flipped vertically). If mirroring is on and that side's king stands on
+ * files e-h, the board is also mirrored left-right, and the king's square selects
+ * one of n_kb input buckets through `layout`. Feature index:
+ *     bucket * 768 + (piece is the perspective's own ? 0 : 384) + type * 64 + square'
  *
- * Accumulators are updated incrementally along the search path (push/pop), so a
- * leaf evaluation only touches the handful of rows that changed.
+ * Accumulators are updated incrementally along the search path. When a king move
+ * changes its own side's bucket or mirroring, that perspective is recomputed from
+ * scratch after the move (Stack::finish). The old "NNU1" format (one bucket, no
+ * mirroring, one output) still loads.
  */
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
 #include <string>
 #include <vector>
-#include <algorithm>
 
 #include "../include/chess.hpp"
 
@@ -33,41 +36,86 @@ constexpr int MAX_PLY = 256;
 
 struct Network {
     int hidden = 0;
-    std::vector<std::int16_t> ft_w;   // [768][hidden]
+    int n_kb = 1;          // king buckets
+    int n_ob = 1;          // output buckets
+    bool mirror = false;
+    std::uint8_t layout[32] = {};
+    std::vector<std::int16_t> ft_w;   // [n_kb * 768][hidden]
     std::vector<std::int16_t> ft_b;   // [hidden]
-    std::vector<float> out_w;         // [2*hidden]
-    float out_b = 0.0f;
+    std::vector<float> out_w;         // [n_ob][2 * hidden]
+    std::vector<float> out_b;         // [n_ob]
 
     bool load(const std::string& path) {
         std::ifstream f(path, std::ios::binary);
         if (!f) return false;
         char magic[4];
         f.read(magic, 4);
-        if (std::memcmp(magic, "NNU1", 4) != 0) return false;
         std::int32_t h = 0;
-        f.read(reinterpret_cast<char*>(&h), 4);
+        if (std::memcmp(magic, "NNU1", 4) == 0) {
+            f.read(reinterpret_cast<char*>(&h), 4);
+            n_kb = n_ob = 1;
+            mirror = false;
+            std::memset(layout, 0, sizeof(layout));
+        } else if (std::memcmp(magic, "NNU2", 4) == 0) {
+            std::int32_t kb = 0, ob = 0;
+            std::uint8_t mir = 0;
+            f.read(reinterpret_cast<char*>(&h), 4);
+            f.read(reinterpret_cast<char*>(&kb), 4);
+            f.read(reinterpret_cast<char*>(&ob), 4);
+            f.read(reinterpret_cast<char*>(&mir), 1);
+            f.read(reinterpret_cast<char*>(layout), 32);
+            if (kb < 1 || kb > 64 || ob < 1 || ob > 32) return false;
+            n_kb = kb;
+            n_ob = ob;
+            mirror = mir != 0;
+            for (auto b : layout)
+                if (b >= n_kb) return false;
+        } else {
+            return false;
+        }
         if (h <= 0 || h > MAX_HIDDEN) return false;
         hidden = h;
-        ft_w.resize(768 * hidden);
+        ft_w.resize(static_cast<size_t>(n_kb) * 768 * hidden);
         ft_b.resize(hidden);
-        out_w.resize(2 * hidden);
+        out_w.resize(static_cast<size_t>(n_ob) * 2 * hidden);
+        out_b.resize(n_ob);
         f.read(reinterpret_cast<char*>(ft_w.data()), ft_w.size() * 2);
         f.read(reinterpret_cast<char*>(ft_b.data()), ft_b.size() * 2);
         f.read(reinterpret_cast<char*>(out_w.data()), out_w.size() * 4);
-        f.read(reinterpret_cast<char*>(&out_b), 4);
+        f.read(reinterpret_cast<char*>(out_b.data()), out_b.size() * 4);
         return static_cast<bool>(f);
     }
 };
 
 inline Network NET;
 
-struct alignas(64) Accumulator {
-    std::int16_t v[2][MAX_HIDDEN];  // [perspective: 0 white, 1 black][hidden]
+// How one perspective sees the board: its king bucket and the file flip (0 or 7).
+struct View {
+    int bucket = 0;
+    int flip = 0;
+    bool operator==(const View& o) const { return bucket == o.bucket && flip == o.flip; }
 };
 
-inline int feature(int persp, int color, int type, int sq) {
-    return persp == 0 ? color * 384 + type * 64 + sq
-                      : (1 - color) * 384 + type * 64 + (sq ^ 56);
+inline View view_for(int persp, int king_sq) {
+    int ks = persp == 0 ? king_sq : king_sq ^ 56;
+    View v;
+    v.flip = (NET.mirror && (ks & 7) >= 4) ? 7 : 0;
+    ks ^= v.flip;
+    // The layout covers files a-d (mirrored nets never see e-h). Unmirrored nets have a
+    // single bucket, so folding e-h onto a-d only keeps the index inside the table.
+    v.bucket = NET.layout[(ks >> 3) * 4 + (ks & 3)];
+    return v;
+}
+
+struct Accumulator {
+    std::int16_t v[2][MAX_HIDDEN];  // [perspective: 0 white, 1 black][hidden]
+    View view[2];
+    bool dirty[2] = {false, false};
+};
+
+inline int feature(int persp, const View& view, int color, int type, int sq) {
+    const int s = (persp == 0 ? sq : sq ^ 56) ^ view.flip;
+    return view.bucket * 768 + (color == persp ? 0 : 384) + type * 64 + s;
 }
 
 inline void add_row(std::int16_t* acc, int feat) {
@@ -80,31 +128,41 @@ inline void sub_row(std::int16_t* acc, int feat) {
 }
 
 inline void add_piece(Accumulator& a, int color, int type, int sq) {
-    add_row(a.v[0], feature(0, color, type, sq));
-    add_row(a.v[1], feature(1, color, type, sq));
+    for (int p = 0; p < 2; p++)
+        if (!a.dirty[p]) add_row(a.v[p], feature(p, a.view[p], color, type, sq));
 }
 inline void sub_piece(Accumulator& a, int color, int type, int sq) {
-    sub_row(a.v[0], feature(0, color, type, sq));
-    sub_row(a.v[1], feature(1, color, type, sq));
+    for (int p = 0; p < 2; p++)
+        if (!a.dirty[p]) sub_row(a.v[p], feature(p, a.view[p], color, type, sq));
 }
 
-inline void refresh(Accumulator& a, const chess::Board& board) {
-    for (int p = 0; p < 2; p++) std::memcpy(a.v[p], NET.ft_b.data(), NET.hidden * 2);
+inline chess::Color color_of(int c) { return c == 0 ? chess::Color::WHITE : chess::Color::BLACK; }
+
+// Recompute one perspective from scratch.
+inline void refresh_persp(Accumulator& a, const chess::Board& board, int p) {
+    a.view[p] = view_for(p, board.kingSq(color_of(p)).index());
+    a.dirty[p] = false;
+    std::memcpy(a.v[p], NET.ft_b.data(), NET.hidden * 2);
     for (int c = 0; c < 2; c++) {
         for (int t = 0; t < 6; t++) {
-            auto bb = board.pieces(chess::PieceType(static_cast<chess::PieceType::underlying>(t)),
-                                   c == 0 ? chess::Color::WHITE : chess::Color::BLACK);
-            while (bb) add_piece(a, c, t, bb.pop());
+            auto bb = board.pieces(chess::PieceType(static_cast<chess::PieceType::underlying>(t)), color_of(c));
+            while (bb) add_row(a.v[p], feature(p, a.view[p], c, t, bb.pop()));
         }
     }
 }
 
+inline void refresh(Accumulator& a, const chess::Board& board) {
+    refresh_persp(a, board, 0);
+    refresh_persp(a, board, 1);
+}
+
 // Side-to-move relative evaluation in centipawns.
-inline int output(const Accumulator& a, bool white_to_move) {
+inline int output(const Accumulator& a, bool white_to_move, int piece_count) {
     const std::int16_t* us = a.v[white_to_move ? 0 : 1];
     const std::int16_t* them = a.v[white_to_move ? 1 : 0];
     const int H = NET.hidden;
-    const float* w = NET.out_w.data();
+    const int ob = std::clamp((piece_count - 2) / 4, 0, NET.n_ob - 1);
+    const float* w = &NET.out_w[static_cast<size_t>(ob) * 2 * H];
     float s = 0.0f;
     for (int i = 0; i < H; i++) {
         int x = std::clamp<int>(us[i], 0, QA);
@@ -114,14 +172,15 @@ inline int output(const Accumulator& a, bool white_to_move) {
         int x = std::clamp<int>(them[i], 0, QA);
         s += static_cast<float>(x * x) * w[H + i];
     }
-    float out = s / static_cast<float>(QA * QA) + NET.out_b;
+    float out = s / static_cast<float>(QA * QA) + NET.out_b[ob];
     // Keep far away from the search's mate-score range.
     return std::clamp(static_cast<int>(out * SCALE), -20000, 20000);
 }
 
 /**
- * Incrementally maintained accumulator stack. Call push(board, move) BEFORE
- * board.makeMove(move), and pop() after board.unmakeMove(move).
+ * Incrementally maintained accumulator stack:
+ *   push(board, move) BEFORE board.makeMove(move), finish(board) right after it,
+ *   pop() after board.unmakeMove(move).
  */
 struct Stack {
     std::vector<Accumulator> acc = std::vector<Accumulator>(MAX_PLY + 4);
@@ -137,6 +196,9 @@ struct Stack {
         const Accumulator& cur = acc[top];
         std::memcpy(next.v[0], cur.v[0], NET.hidden * 2);
         std::memcpy(next.v[1], cur.v[1], NET.hidden * 2);
+        next.view[0] = cur.view[0];
+        next.view[1] = cur.view[1];
+        next.dirty[0] = next.dirty[1] = false;
         top++;
 
         const int us = board.sideToMove() == chess::Color::WHITE ? 0 : 1;
@@ -144,6 +206,13 @@ struct Stack {
         const int from = m.from().index();
         const int to = m.to().index();
         const int moved = static_cast<int>(board.at<chess::PieceType>(m.from()));
+
+        // A king move that changes its own side's bucket or mirroring invalidates that
+        // whole perspective: skip its deltas and recompute it in finish().
+        if (moved == 5) {
+            const int king_to = m.typeOf() == chess::Move::CASTLING ? (from & 56) + (to > from ? 6 : 2) : to;
+            if (!(view_for(us, king_to) == cur.view[us])) next.dirty[us] = true;
+        }
 
         if (m.typeOf() == chess::Move::CASTLING) {
             // chess.hpp encodes castling as "king takes own rook".
@@ -158,8 +227,7 @@ struct Stack {
             return;
         }
         if (m.typeOf() == chess::Move::ENPASSANT) {
-            const int cap_sq = to ^ 8;
-            sub_piece(next, them, 0, cap_sq);
+            sub_piece(next, them, 0, to ^ 8);
         } else {
             const auto captured = board.at<chess::PieceType>(m.to());
             if (captured != chess::PieceType::NONE) sub_piece(next, them, static_cast<int>(captured), to);
@@ -169,17 +237,28 @@ struct Stack {
         add_piece(next, us, placed, to);
     }
 
+    // Call after board.makeMove(): recomputes perspectives a king move invalidated.
+    void finish(const chess::Board& board) {
+        Accumulator& a = acc[top];
+        for (int p = 0; p < 2; p++)
+            if (a.dirty[p]) refresh_persp(a, board, p);
+    }
+
     void push_null() {
         Accumulator& next = acc[top + 1];
-        std::memcpy(next.v[0], acc[top].v[0], NET.hidden * 2);
-        std::memcpy(next.v[1], acc[top].v[1], NET.hidden * 2);
+        const Accumulator& cur = acc[top];
+        std::memcpy(next.v[0], cur.v[0], NET.hidden * 2);
+        std::memcpy(next.v[1], cur.v[1], NET.hidden * 2);
+        next.view[0] = cur.view[0];
+        next.view[1] = cur.view[1];
+        next.dirty[0] = next.dirty[1] = false;
         top++;
     }
 
     void pop() { top--; }
 
     int evaluate(const chess::Board& board) const {
-        return output(acc[top], board.sideToMove() == chess::Color::WHITE);
+        return output(acc[top], board.sideToMove() == chess::Color::WHITE, board.occ().count());
     }
 };
 

@@ -61,7 +61,8 @@ class NNUE(torch.nn.Module):
         us = torch.clamp(self.ft(idx_us) + self.ft_bias, 0, 1) ** 2
         them = torch.clamp(self.ft(idx_them) + self.ft_bias, 0, 1) ** 2
         out = self.out(torch.cat([us, them], dim=1))
-        return out.gather(1, obucket.unsqueeze(1)).squeeze(1)
+        ob = obucket.clamp(max=out.shape[1] - 1)   # 1-bucket (v1) nets: always bucket 0
+        return out.gather(1, ob.unsqueeze(1)).squeeze(1)
 
     def clip(self):
         for p in self.parameters():
