@@ -103,7 +103,7 @@ def main():
            "-sprt", f"elo0={args.elo0}", f"elo1={args.elo1}", "alpha=0.05", "beta=0.05", "model=normalized",
            "-draw", "movenumber=40", "movecount=8", "score=10",
            "-resign", "movecount=3", "score=1000",
-           "-ratinginterval", "200",
+           "-ratinginterval", "200", "-recover",
            "-pgnout", f"file={pgn}"]
     print(f"{name}: {new_exe}\n  vs {base_exe}\n  {'tc ' + args.tc if args.tc else str(args.nodes) + ' nodes/move'}, "
           f"SPRT [{args.elo0}, {args.elo1}], concurrency {args.concurrency}", flush=True)
@@ -115,8 +115,12 @@ def main():
         if re.search(r"Elo:|LLR|Games:|SPRT|H0|H1", line):
             print(line.rstrip(), flush=True)
     proc.wait()
-
     text = "".join(out)
+    with open(pgn[:-4] + ".log", "w", encoding="utf-8") as f:
+        f.write(text)
+    if proc.returncode != 0:
+        print(f"fastchess exited with code {proc.returncode}; full output in {pgn[:-4]}.log")
+
     def last(pattern):
         m = re.findall(pattern, text)
         return m[-1] if m else ""

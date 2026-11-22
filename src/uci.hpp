@@ -13,12 +13,21 @@
  */
 
 #include <iostream>
+#include <mutex>
 #include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
 
 namespace uci_mode {
+
+// The search thread (info, bestmove) and the input loop (readyok, uciok) both write
+// to stdout; without a lock their lines can interleave and a GUI misses "readyok".
+inline std::mutex out_mutex;
+inline void send(const std::string& line) {
+    std::lock_guard<std::mutex> lock(out_mutex);
+    std::cout << line << std::endl;
+}
 
 struct Options {
     int multipv = 1;
@@ -45,7 +54,7 @@ inline void print_info(const RootResult& r, int multipv, bool white_to_move) {
         }
         os << " nodes " << r.nodes << " nps " << (r.nodes * 1000 / ms) << " time " << r.ms << " pv";
         for (const auto& mv : (m.pv.empty() ? std::vector<Move>{m.move} : m.pv)) os << " " << chess::uci::moveToUci(mv);
-        std::cout << os.str() << std::endl;
+        send(os.str());
     }
 }
 
@@ -56,7 +65,7 @@ inline void think(Board board, int max_depth, long long hard_ms, Limits limits, 
     Movelist legal;
     chess::movegen::legalmoves(legal, board);
     if (legal.empty()) {
-        std::cout << "bestmove 0000" << std::endl;
+        send("bestmove 0000");
         return;
     }
     tb::RootInfo tbi;
@@ -83,7 +92,10 @@ inline void think(Board board, int max_depth, long long hard_ms, Limits limits, 
         pick = choose_move(r, elo, rng);
     }
     const Move best = r.moves.empty() ? legal[0] : r.moves[pick].move;
-    std::cout << "bestmove " << chess::uci::moveToUci(best) << std::endl;
+    // A partial last iteration can change the best move after the last "info"; report
+    // the final line so the PV starts with the move actually played.
+    if (!r.moves.empty() && pick == 0) print_info(r, 1, white);
+    send("bestmove " + chess::uci::moveToUci(best));
 }
 
 inline int run() {
@@ -102,18 +114,17 @@ inline int run() {
         ss >> cmd;
 
         if (cmd == "uci") {
-            std::cout << "id name HybridNNUE\n"
-                         "id author chessbot\n"
-                         "option name Threads type spin default 1 min 1 max 64\n"
-                         "option name MultiPV type spin default 1 min 1 max 8\n"
-                         "option name Move Overhead type spin default 30 min 0 max 5000\n"
-                         "option name SyzygyPath type string default <empty>\n"
-                         "option name UCI_LimitStrength type check default false\n"
-                         "option name UCI_Elo type spin default 2900 min 800 max 2900\n"
-                         "uciok"
-                      << std::endl;
+            send("id name HybridNNUE\n"
+                 "id author chessbot\n"
+                 "option name Threads type spin default 1 min 1 max 64\n"
+                 "option name MultiPV type spin default 1 min 1 max 8\n"
+                 "option name Move Overhead type spin default 30 min 0 max 5000\n"
+                 "option name SyzygyPath type string default <empty>\n"
+                 "option name UCI_LimitStrength type check default false\n"
+                 "option name UCI_Elo type spin default 2900 min 800 max 2900\n"
+                 "uciok");
         } else if (cmd == "isready") {
-            std::cout << "readyok" << std::endl;
+            send("readyok");
         } else if (cmd == "ucinewgame") {
             wait();
             tt_clear();
