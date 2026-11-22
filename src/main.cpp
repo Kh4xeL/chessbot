@@ -187,6 +187,7 @@ struct Search {
     struct Frame {
         int piece = -1;   // piece moved at this ply (-1: none / null move)
         int to = 0;
+        int eval = -INF;  // static eval at this ply (-INF when in check)
     };
     Frame ss[MAX_PLY + 4];
     Move pv[MAX_PLY][MAX_PLY];
@@ -447,10 +448,15 @@ struct Search {
 
         const int static_eval = in_check ? -INF : nn.evaluate(b);
         const chess::Color stm = b.sideToMove();
+        ss[ply].eval = static_eval;
+        // "Improving": our static eval is better than two plies ago (our previous turn).
+        // When it isn't, the position is drifting the wrong way, so prune and reduce more.
+        const bool improving = !in_check && ply >= 2 && ss[ply - 2].eval != -INF && static_eval > ss[ply - 2].eval;
 
         if (!pv_node && !in_check) {
             // Reverse futility pruning
-            if (depth <= 6 && static_eval - 80 * depth >= beta && std::abs(beta) < MATE_BOUND) return static_eval;
+            if (depth <= 6 && static_eval - 80 * (depth - improving) >= beta && std::abs(beta) < MATE_BOUND)
+                return static_eval;
 
             // Null move pruning. Not with less than a rook or two minors: in such endgames
             // zugzwang is common and "passing" would wrongly look safe (e.g. Morphy's Ra6!).
@@ -491,7 +497,7 @@ struct Search {
 
             // Late move pruning: at shallow depth skip late quiet moves outright.
             if (!pv_node && !in_check && quiet && best > -MATE_BOUND && depth <= 3 &&
-                searched >= 4 + depth * depth * 2)
+                searched >= (improving ? 4 + depth * depth * 2 : 2 + depth * depth))
                 continue;
 
             // SEE pruning: at shallow depth skip moves that lose too much material outright.
@@ -511,6 +517,7 @@ struct Search {
                 if (depth >= 3 && searched >= (pv_node ? 3 : 2) && quiet && !in_check && !gives_check) {
                     R = lmr[std::min(depth, 63)][std::min(searched, 63)];
                     if (pv_node) R--;
+                    if (!improving) R++;
                     if (m.move() == killers[ply][0] || m.move() == killers[ply][1]) R--;
                     R = std::clamp(R, 0, depth - 2);
                 }
@@ -632,6 +639,7 @@ RootResult iterate(Search& T, Board board, std::vector<RootMove> rms, int max_de
         for (size_t i = 0; i < cur.size(); i++) {
             RootMove& rm = cur[i];
             int alpha = static_cast<int>(exact_scores.size()) >= K ? exact_scores[K - 1] : -INF;
+            T.ss[0].eval = -INF;
             T.ss[0].piece = Search::moved_piece(board, rm.move);
             T.ss[0].to = Search::dest(rm.move);
             T.make(board, rm.move);
