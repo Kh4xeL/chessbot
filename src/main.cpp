@@ -99,55 +99,93 @@ struct TTSlot {
     std::atomic<std::uint64_t> data{0};
 };
 
-constexpr size_t TT_SIZE = 1u << 22;   // 4M slots x 16 bytes = 64 MB
-std::vector<TTSlot> TT(TT_SIZE);
+// Buckets of 4 slots (one 64-byte cache line). Each entry carries the generation of the
+// search that wrote it, so entries left over from earlier moves are replaced first.
+constexpr int TT_WAYS = 4;
+constexpr size_t TT_BUCKETS = 1u << 20;   // 1M buckets x 4 slots x 16 bytes = 64 MB
+struct alignas(64) TTBucket {
+    TTSlot slot[TT_WAYS];
+};
+std::vector<TTBucket> TT(TT_BUCKETS);
+std::uint8_t tt_gen = 0;
+
+inline void tt_new_search() { tt_gen = static_cast<std::uint8_t>(tt_gen + 1); }
 
 inline std::uint64_t tt_pack(int score, std::uint16_t move, int depth, Bound bound) {
     return static_cast<std::uint64_t>(static_cast<std::uint16_t>(static_cast<std::int16_t>(score))) |
            (static_cast<std::uint64_t>(move) << 16) |
            (static_cast<std::uint64_t>(static_cast<std::uint8_t>(static_cast<std::int8_t>(depth))) << 32) |
-           (static_cast<std::uint64_t>(bound) << 40);
+           (static_cast<std::uint64_t>(bound) << 40) | (static_cast<std::uint64_t>(tt_gen) << 48);
 }
 
+inline TTBucket& tt_bucket(std::uint64_t key) { return TT[key & (TT_BUCKETS - 1)]; }
+inline int tt_depth_of(std::uint64_t d) { return static_cast<std::int8_t>((d >> 32) & 0xFF); }
+inline std::uint8_t tt_gen_of(std::uint64_t d) { return static_cast<std::uint8_t>((d >> 48) & 0xFF); }
+
 inline bool tt_probe(std::uint64_t key, TTData& out) {
-    const TTSlot& slot = TT[key & (TT_SIZE - 1)];
-    const std::uint64_t d = slot.data.load(std::memory_order_relaxed);
-    if ((slot.key_xor.load(std::memory_order_relaxed) ^ d) != key) return false;
-    out.score = static_cast<std::int16_t>(d & 0xFFFF);
-    out.move = static_cast<std::uint16_t>((d >> 16) & 0xFFFF);
-    out.depth = static_cast<std::int8_t>((d >> 32) & 0xFF);
-    out.bound = static_cast<Bound>((d >> 40) & 0xFF);
-    return true;
+    const TTBucket& bk = tt_bucket(key);
+    for (const TTSlot& slot : bk.slot) {
+        const std::uint64_t d = slot.data.load(std::memory_order_relaxed);
+        if ((slot.key_xor.load(std::memory_order_relaxed) ^ d) != key || d == 0) continue;
+        out.score = static_cast<std::int16_t>(d & 0xFFFF);
+        out.move = static_cast<std::uint16_t>((d >> 16) & 0xFFFF);
+        out.depth = tt_depth_of(d);
+        out.bound = static_cast<Bound>((d >> 40) & 0xFF);
+        return true;
+    }
+    return false;
+}
+
+// Pick the slot to write: the one already holding this key, else the least valuable
+// (empty first, then by depth minus 8 per generation of age). Returns null when the
+// entry for this key should be kept (deeper, same search, and the new one isn't exact).
+inline TTSlot* tt_victim(std::uint64_t key, int depth, Bound bound, std::uint16_t& move) {
+    TTBucket& bk = tt_bucket(key);
+    TTSlot* victim = nullptr;
+    int worst = 1 << 30;
+    for (TTSlot& slot : bk.slot) {
+        const std::uint64_t d = slot.data.load(std::memory_order_relaxed);
+        const std::uint64_t kx = slot.key_xor.load(std::memory_order_relaxed);
+        if (d == 0 && kx == 0) {
+            if (worst > -1000) { victim = &slot; worst = -1000; }
+            continue;
+        }
+        if ((kx ^ d) == key) {
+            if (move == 0) move = static_cast<std::uint16_t>((d >> 16) & 0xFFFF);   // keep the old best move
+            if (tt_gen_of(d) == tt_gen && depth < tt_depth_of(d) && bound != BOUND_EXACT) return nullptr;
+            return &slot;
+        }
+        const int age = static_cast<std::uint8_t>(tt_gen - tt_gen_of(d));
+        const int value = tt_depth_of(d) - 8 * age;
+        if (value < worst) { victim = &slot; worst = value; }
+    }
+    return victim;
+}
+
+inline void tt_write(TTSlot* slot, std::uint64_t key, std::uint64_t d) {
+    slot->data.store(d, std::memory_order_relaxed);
+    slot->key_xor.store(key ^ d, std::memory_order_relaxed);
 }
 
 inline void tt_store(std::uint64_t key, int score, std::uint16_t move, int depth, Bound bound) {
-    TTSlot& slot = TT[key & (TT_SIZE - 1)];
-    TTData old;
-    // Depth-preferred replacement, but exact scores and other positions always overwrite.
-    if (tt_probe(key, old) && depth < old.depth && bound != BOUND_EXACT) return;
-    const std::uint64_t d = tt_pack(score, move, depth, bound);
-    slot.data.store(d, std::memory_order_relaxed);
-    slot.key_xor.store(key ^ d, std::memory_order_relaxed);
+    if (TTSlot* slot = tt_victim(key, depth, bound, move)) tt_write(slot, key, tt_pack(score, move, depth, bound));
 }
 
-// Quiescence results (depth 0) only go into empty or depth <= 0 slots, so they never
-// push out results of real searches.
+// Quiescence results (depth 0) never push out results of real searches from this search.
 inline void tt_store_q(std::uint64_t key, int score, std::uint16_t move, Bound bound) {
-    TTSlot& slot = TT[key & (TT_SIZE - 1)];
-    const std::uint64_t old = slot.data.load(std::memory_order_relaxed);
-    const int old_depth = static_cast<std::int8_t>((old >> 32) & 0xFF);
-    const bool empty = old == 0 && slot.key_xor.load(std::memory_order_relaxed) == 0;
-    if (!empty && old_depth > 0) return;
-    const std::uint64_t d = tt_pack(score, move, 0, bound);
-    slot.data.store(d, std::memory_order_relaxed);
-    slot.key_xor.store(key ^ d, std::memory_order_relaxed);
+    TTSlot* slot = tt_victim(key, 0, bound, move);
+    if (!slot) return;
+    const std::uint64_t old = slot->data.load(std::memory_order_relaxed);
+    if (old != 0 && tt_depth_of(old) > 0 && tt_gen_of(old) == tt_gen) return;
+    tt_write(slot, key, tt_pack(score, move, 0, bound));
 }
 
 void tt_clear() {
-    for (auto& slot : TT) {
-        slot.key_xor.store(0, std::memory_order_relaxed);
-        slot.data.store(0, std::memory_order_relaxed);
-    }
+    for (auto& bk : TT)
+        for (auto& slot : bk.slot) {
+            slot.key_xor.store(0, std::memory_order_relaxed);
+            slot.data.store(0, std::memory_order_relaxed);
+        }
 }
 
 inline int score_to_tt(int s, int ply) {
@@ -799,6 +837,7 @@ RootResult iterate(Search& T, Board board, std::vector<RootMove> rms, int max_de
 RootResult search_root(Board board, int max_depth, long long time_ms, int multipv, bool verbose,
                        const std::vector<Move>& only = {}, int elo = 2800) {
     RootResult res;
+    tt_new_search();
     Movelist all, legal;
     chess::movegen::legalmoves(all, board);
     for (const auto& m : all)
