@@ -130,6 +130,19 @@ inline void tt_store(std::uint64_t key, int score, std::uint16_t move, int depth
     slot.key_xor.store(key ^ d, std::memory_order_relaxed);
 }
 
+// Quiescence results (depth 0) only go into empty or depth <= 0 slots, so they never
+// push out results of real searches.
+inline void tt_store_q(std::uint64_t key, int score, std::uint16_t move, Bound bound) {
+    TTSlot& slot = TT[key & (TT_SIZE - 1)];
+    const std::uint64_t old = slot.data.load(std::memory_order_relaxed);
+    const int old_depth = static_cast<std::int8_t>((old >> 32) & 0xFF);
+    const bool empty = old == 0 && slot.key_xor.load(std::memory_order_relaxed) == 0;
+    if (!empty && old_depth > 0) return;
+    const std::uint64_t d = tt_pack(score, move, 0, bound);
+    slot.data.store(d, std::memory_order_relaxed);
+    slot.key_xor.store(key ^ d, std::memory_order_relaxed);
+}
+
 void tt_clear() {
     for (auto& slot : TT) {
         slot.key_xor.store(0, std::memory_order_relaxed);
@@ -356,12 +369,28 @@ struct Search {
         if (stop) return 0;
         if (ply >= MAX_PLY - 1) return nn.evaluate(b);
 
+        // Hash table: any stored result (every search depth counts here) can end this node.
+        const std::uint64_t key = b.zobrist();
+        TTData tte;
+        std::uint16_t tt_move = 0;
+        if (tt_probe(key, tte)) {
+            const int s = score_from_tt(tte.score, ply);
+            if (tte.bound == BOUND_EXACT || (tte.bound == BOUND_LOWER && s >= beta) ||
+                (tte.bound == BOUND_UPPER && s <= alpha))
+                return s;
+            tt_move = tte.move;
+        }
+        const int orig_alpha = alpha;
+
         const bool in_check = b.inCheck();
         int best = -INF;
         int stand = 0;
         if (!in_check) {
             stand = nn.evaluate(b);
-            if (stand >= beta) return stand;
+            if (stand >= beta) {
+                tt_store_q(key, score_to_tt(stand, ply), 0, BOUND_LOWER);
+                return stand;
+            }
             if (stand > alpha) alpha = stand;
             best = stand;
         }
@@ -372,7 +401,8 @@ struct Search {
         if (in_check && moves.empty()) return -MATE + ply;
 
         int scores[256];
-        for (int i = 0; i < moves.size(); i++) scores[i] = score_move(b, moves[i], 0, MAX_PLY);
+        for (int i = 0; i < moves.size(); i++) scores[i] = score_move(b, moves[i], tt_move, MAX_PLY);
+        Move best_move = Move(Move::NO_MOVE);
 
         for (int i = 0; i < moves.size(); i++) {
             pick(moves, scores, i);
@@ -393,10 +423,13 @@ struct Search {
                 best = s;
                 if (s > alpha) {
                     alpha = s;
+                    best_move = m;
                     if (alpha >= beta) break;
                 }
             }
         }
+        const Bound bound = best >= beta ? BOUND_LOWER : (best > orig_alpha ? BOUND_EXACT : BOUND_UPPER);
+        tt_store_q(key, score_to_tt(best, ply), best_move.move(), bound);
         return best;
     }
 
