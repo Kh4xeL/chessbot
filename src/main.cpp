@@ -19,11 +19,14 @@
  *   engine --test                              all engine self-checks (NNUE, SEE, mates, ...)
  *   engine --bench [ms]                        search speed on a few positions
  *   --threads N                                (any mode) Lazy SMP search threads, default 1
+ *   --syzygy DIR                               (any mode) Syzygy tablebases; default $SYZYGY_PATH or
+ *                                              tools/syzygy, "none" to disable
  *
  * Output block (parsed by python/api.py):
  *   BEST_MOVE:e2e4
  *   EVAL:0.31                  (pawns, White's point of view)
  *   MATE:3                     (only when a mate is found: mate in N, + = White mates)
+ *   TABLEBASE:1                (only in tablebase positions: 1 / 0 / -1 = White wins / draw / loses)
  *   DEPTH_REACHED:14
  *   TUTOR_DATA:
  *   RANK:1|MOVE:e2e4|IDEA:e2e4 e7e5 g1f3 ...|EVAL:0.31[|MATE:n]   (top 3 for the side to move;
@@ -49,6 +52,7 @@
 #include "../include/chess.hpp"
 #include "nnue.hpp"
 #include "policy_net.hpp"
+#include "tablebase.hpp"
 
 using chess::Board;
 using chess::Move;
@@ -61,6 +65,17 @@ constexpr int INF = 32000;
 constexpr int MATE = 31000;
 constexpr int MATE_BOUND = MATE - 1000;   // scores beyond this are "mate in N"
 constexpr int MAX_PLY = 128;
+constexpr int TB_WIN_SCORE = 28000;        // tablebase win (minus ply), below mate scores
+constexpr int TB_BOUND = TB_WIN_SCORE - 1000;
+
+// Score shown to users: mates as +-100 pawns, tablebase wins as +-90, else unchanged.
+inline int display_cp(int s) {
+    if (s >= MATE_BOUND) return 10000;
+    if (s <= -MATE_BOUND) return -10000;
+    if (s >= TB_BOUND) return 9000;
+    if (s <= -TB_BOUND) return -9000;
+    return s;
+}
 
 // ---------------------------------------------------------------------------
 // Transposition table
@@ -139,6 +154,7 @@ std::atomic<bool> g_stop{false};
 struct Search {
     nnue::Stack nn;
     std::uint64_t nodes = 0;
+    std::uint64_t tb_hits = 0;
     std::atomic<bool>& stop = g_stop;
     bool is_main = true;      // only the main thread checks the clock
     std::chrono::steady_clock::time_point start;
@@ -165,7 +181,7 @@ struct Search {
         if (is_main && (nodes & 2047) == 0 && elapsed_ms() >= time_limit_ms) stop = true;
     }
 
-    void make(Board& b, const Move& m) { nn.push(b, m); b.makeMove(m); }
+    void make(Board& b, const Move& m) { nn.push(b, m); b.makeMove(m); nn.finish(b); }
     void unmake(Board& b, const Move& m) { b.unmakeMove(m); nn.pop(); }
 
     // ------------------------------------------------------------- ordering
@@ -355,6 +371,20 @@ struct Search {
             }
         }
 
+        // Endgame tablebase (after captures / pawn moves): the exact result for the side to move.
+        if (tb::enabled) {
+            const unsigned wdl = tb::probe_wdl(b);
+            if (wdl != TB_RESULT_FAILED) {
+                tb_hits++;
+                const int v = wdl == TB_WIN ? TB_WIN_SCORE - ply : wdl == TB_LOSS ? -TB_WIN_SCORE + ply : 0;
+                const Bound bd = wdl == TB_WIN ? BOUND_LOWER : wdl == TB_LOSS ? BOUND_UPPER : BOUND_EXACT;
+                if (bd == BOUND_EXACT || (bd == BOUND_LOWER && v >= beta) || (bd == BOUND_UPPER && v <= alpha)) {
+                    tt_store(key, v, 0, std::min(depth + 6, 120), bd);
+                    return v;
+                }
+            }
+        }
+
         const int static_eval = in_check ? -INF : nn.evaluate(b);
         const chess::Color stm = b.sideToMove();
 
@@ -362,8 +392,11 @@ struct Search {
             // Reverse futility pruning
             if (depth <= 6 && static_eval - 80 * depth >= beta && std::abs(beta) < MATE_BOUND) return static_eval;
 
-            // Null move pruning
-            if (allow_null && depth >= 3 && static_eval >= beta && b.hasNonPawnMaterial(stm)) {
+            // Null move pruning. Not with less than a rook or two minors: in such endgames
+            // zugzwang is common and "passing" would wrongly look safe (e.g. Morphy's Ra6!).
+            const int npm = 3 * (b.pieces(chess::PieceType::KNIGHT, stm).count() + b.pieces(chess::PieceType::BISHOP, stm).count()) +
+                            5 * b.pieces(chess::PieceType::ROOK, stm).count() + 9 * b.pieces(chess::PieceType::QUEEN, stm).count();
+            if (allow_null && depth >= 3 && static_eval >= beta && npm >= 5) {
                 const int R = 3 + depth / 4;
                 nn.push_null();
                 b.makeNullMove();
@@ -483,15 +516,19 @@ Search S;                                    // main search thread
 std::vector<std::unique_ptr<Search>> HELPERS;  // extra Lazy SMP threads
 int g_threads = 1;
 
-std::vector<float> root_priors(const Board& board, const Movelist& moves) {
+// Policy probabilities for the root moves; `elo` is the rating whose play to imitate
+// (both players are assumed to be about that strength).
+std::vector<float> root_priors(const Board& board, const Movelist& moves, int elo) {
     std::vector<float> pri(moves.size(), 1.0f / std::max(1, moves.size()));
     if (!policy::NET.loaded || moves.empty()) return pri;
-    auto logits = policy::NET.forward(board);
+    const int r = std::clamp(elo, 600, 2800);
+    auto logits = policy::NET.forward(board, r, r);
+    const bool white = board.sideToMove() == chess::Color::WHITE;
     float mx = -1e30f;
-    for (int i = 0; i < moves.size(); i++) mx = std::max(mx, logits[policy::Net::move_index(moves[i])]);
+    for (int i = 0; i < moves.size(); i++) mx = std::max(mx, logits[policy::NET.move_index(moves[i], white)]);
     float sum = 0;
     for (int i = 0; i < moves.size(); i++) {
-        pri[i] = std::exp(logits[policy::Net::move_index(moves[i])] - mx);
+        pri[i] = std::exp(logits[policy::NET.move_index(moves[i], white)] - mx);
         sum += pri[i];
     }
     for (auto& p : pri) p /= sum;
@@ -591,13 +628,17 @@ RootResult iterate(Search& T, Board board, std::vector<RootMove> rms, int max_de
     return res;
 }
 
-RootResult search_root(Board board, int max_depth, long long time_ms, int multipv, bool verbose) {
+// `only`, when non-empty, restricts the root moves (used to keep tablebase-preserving moves).
+RootResult search_root(Board board, int max_depth, long long time_ms, int multipv, bool verbose,
+                       const std::vector<Move>& only = {}, int elo = 2800) {
     RootResult res;
-    Movelist legal;
-    chess::movegen::legalmoves(legal, board);
+    Movelist all, legal;
+    chess::movegen::legalmoves(all, board);
+    for (const auto& m : all)
+        if (only.empty() || std::find(only.begin(), only.end(), m) != only.end()) legal.add(m);
     if (legal.empty()) return res;
 
-    auto pri = root_priors(board, legal);
+    auto pri = root_priors(board, legal, elo);
     std::vector<RootMove> rms;
     for (int i = 0; i < legal.size(); i++) {
         RootMove rm;
@@ -645,7 +686,7 @@ size_t choose_move(const RootResult& r, int elo, std::mt19937& rng) {
     if (elo >= 2900 || r.moves.size() < 2) return 0;
     // Sampling temperature in centipawns, interpolated between points calibrated with
     // training/match.py against Stockfish's UCI_Elo (1400 and up; below that extrapolated).
-    static const double pts[][2] = {{800, 300}, {1400, 214}, {1800, 75}, {2200, 50}, {2600, 28}, {2900, 8}};
+    static const double pts[][2] = {{800, 420}, {1400, 300}, {1800, 95}, {2200, 70}, {2600, 40}, {2900, 8}};
     double temp = 300;
     for (size_t i = 1; i < std::size(pts); i++) {
         if (elo <= pts[i][0]) {
@@ -703,25 +744,50 @@ void run_go(const std::string& fen, const std::vector<std::string>& moves, int e
     const int depth = std::min(max_depth, depth_cap_for_elo(elo));
     const int multipv = elo >= 2900 ? 3 : 8;
 
-    RootResult r = search_root(board, depth, main_ms, multipv, true);
-    const size_t pick = choose_move(r, elo, rng);
+    // Tablebase position: only search moves that keep the theoretical result. Below
+    // ~2200 the bot plays endgames by its own (imperfect) judgement, like a human would.
+    tb::RootInfo tbi;
+    const bool use_tb = elo >= 2200 && tb::probe_root(board, tbi);
+    std::vector<Move> keep;
+    if (use_tb)
+        for (const auto& m : tbi.moves)
+            if (m.wdl == tbi.wdl) keep.push_back(m.move);
+
+    RootResult r = search_root(board, depth, main_ms, multipv, true, keep, elo);
+    const bool tb_win = use_tb && tbi.wdl == TB_WIN;
+    if (tb_win) {
+        // Winning: the tablebase's move converts fastest (search alone can shuffle), so it
+        // goes first, for the bot and for the tutor's top line.
+        auto it = std::find_if(r.moves.begin(), r.moves.end(), [&](const RootMove& m) { return m.move == tbi.best; });
+        if (it != r.moves.end()) {
+            std::rotate(r.moves.begin(), it, it + 1);
+            r.moves[0].score = TB_WIN_SCORE - 1;
+            r.moves[0].exact = true;
+        }
+    }
+    const size_t pick = tb_win ? 0 : choose_move(r, elo, rng);
     const RootMove& chosen = r.moves[pick];
 
     const bool white = board.sideToMove() == chess::Color::WHITE;
     auto to_white_pawns = [white](int s) {
-        if (s >= MATE_BOUND) s = 10000;
-        if (s <= -MATE_BOUND) s = -10000;
+        s = display_cp(s);
         return (white ? s : -s) / 100.0;
     };
 
     out << "BEST_MOVE:" << chess::uci::moveToUci(chosen.move) << "\n";
     // If time ran out before depth 1 finished there are no scores; report the static eval.
-    const int eval_stm = r.depth > 0 ? chosen.score : S.nn.evaluate(board);
+    int eval_stm = r.depth > 0 ? chosen.score : S.nn.evaluate(board);
+    if (use_tb) eval_stm = tbi.wdl == TB_WIN ? TB_WIN_SCORE : tbi.wdl == TB_LOSS ? -TB_WIN_SCORE : 0;
     out << "EVAL:" << to_white_pawns(eval_stm) << "\n";
     if (std::abs(eval_stm) >= MATE_BOUND) {
         // Mate in N full moves, positive when White is the one mating.
         const int n = (MATE - std::abs(eval_stm) + 1) / 2;
         out << "MATE:" << (((eval_stm > 0) == white) ? n : -n) << "\n";
+    }
+    if (use_tb) {
+        // Theoretical result from the tablebase, White's point of view: 1 win, 0 draw, -1 loss.
+        const int stm_res = (tbi.wdl == TB_WIN) ? 1 : (tbi.wdl == TB_LOSS) ? -1 : 0;
+        out << "TABLEBASE:" << (white ? stm_res : -stm_res) << "\n";
     }
     out << "DEPTH_REACHED:" << r.depth << "\n";
 
@@ -729,9 +795,7 @@ void run_go(const std::string& fen, const std::vector<std::string>& moves, int e
     auto line_eval = [](const RootMove& m, bool white_to_move) {
         if (!m.exact || m.score <= -INF) return std::string();
         std::ostringstream os;
-        int s = m.score;
-        if (s >= MATE_BOUND) s = 10000;
-        if (s <= -MATE_BOUND) s = -10000;
+        const int s = display_cp(m.score);
         os << "|EVAL:" << (white_to_move ? s : -s) / 100.0;
         if (std::abs(m.score) >= MATE_BOUND) {
             const int n = (MATE - std::abs(m.score) + 1) / 2;
@@ -750,7 +814,7 @@ void run_go(const std::string& fen, const std::vector<std::string>& moves, int e
     // Top replies for the human, on the position after the bot's move.
     Board after = board;
     after.makeMove(chosen.move);
-    RootResult u = search_root(after, std::max(1, r.depth - 1), supp_ms, 3, false);
+    RootResult u = search_root(after, std::max(1, r.depth - 1), supp_ms, 3, false, {}, elo);
     out << "USER_TUTOR_DATA:\n";
     for (size_t i = 0; i < u.moves.size() && i < 3; i++) {
         const RootMove& m = u.moves[i];
@@ -782,6 +846,24 @@ std::string find_asset(const std::string& name, const char* argv0) {
     return "assets/" + name;
 }
 
+std::string g_syzygy;   // --syzygy <dir>; "none" disables
+
+void init_tablebases(const char* argv0) {
+    std::string path = g_syzygy;
+    if (path.empty()) {
+        if (const char* env = std::getenv("SYZYGY_PATH")) path = env;
+    }
+    if (path.empty()) {
+        // tools/syzygy next to assets/ (same search as the networks)
+        std::string probe = find_asset("../tools/syzygy/KQvK.rtbw", argv0);
+        for (const char* c : {"tools/syzygy", "../tools/syzygy", "../../tools/syzygy"})
+            if (std::ifstream(std::string(c) + "/KQvK.rtbw", std::ios::binary)) { path = c; break; }
+        if (path.empty() && std::ifstream(probe, std::ios::binary)) path = probe.substr(0, probe.size() - 10);
+    }
+    if (path == "none") return;
+    if (tb::init(path)) std::cerr << "[engine] Syzygy tablebases: up to " << tb::largest() << " pieces (" << path << ")\n";
+}
+
 bool load_networks(const char* argv0) {
     const std::string nn_path = find_asset("nnue.bin", argv0);
     if (!nnue::NET.load(nn_path)) {
@@ -789,26 +871,39 @@ bool load_networks(const char* argv0) {
         std::cout << "BEST_MOVE:ERROR_LOADING_MODEL" << std::endl;
         return false;
     }
-    const std::string pol_path = find_asset("policy_cnn.bin", argv0);
-    if (!policy::NET.load(pol_path)) std::cerr << "[engine] policy net not found (" << pol_path << "), continuing without it\n";
+    // Prefer the rating-aware policy; fall back to the original CNN's.
+    const std::string elo_path = find_asset("policy_elo.bin", argv0);
+    if (!policy::NET.load(elo_path)) {
+        const std::string pol_path = find_asset("policy_cnn.bin", argv0);
+        if (!policy::NET.load(pol_path))
+            std::cerr << "[engine] policy net not found (" << pol_path << "), continuing without it\n";
+    }
     return true;
 }
 
 int selftest(const char* argv0) {
-    std::ifstream f(find_asset("policy_cnn_test.txt", argv0));
-    std::string fen, ref;
-    int fails = 0;
-    while (std::getline(f, fen) && std::getline(f, ref)) {
+    // Reference logits written by the exporter: "fen[|mover_elo|opp_elo]" then "idx:logit ...".
+    std::ifstream f(find_asset(policy::NET.version == 2 ? "policy_elo_test.txt" : "policy_cnn_test.txt", argv0));
+    std::string line, ref;
+    int fails = 0, cases = 0;
+    while (std::getline(f, line) && std::getline(f, ref)) {
+        cases++;
+        std::string fen = line;
+        int me = 2000, opp = 2000;
+        if (line.find('|') != std::string::npos) {
+            fen = line.substr(0, line.find('|'));
+            std::sscanf(line.c_str() + line.find('|') + 1, "%d|%d", &me, &opp);
+        }
         Board b(fen);
         auto t0 = std::chrono::steady_clock::now();
-        auto logits = policy::NET.forward(b);
+        auto logits = policy::NET.forward(b, me, opp);
         auto ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
         std::istringstream ss(ref);
         std::string tok;
         while (ss >> tok) {
             int idx = std::stoi(tok.substr(0, tok.find(':')));
             float want = std::stof(tok.substr(tok.find(':') + 1));
-            if (std::abs(logits[idx] - want) > 1e-3f) {
+            if (std::abs(logits[idx] - want) > 1e-3f * std::max(1.0f, std::abs(want))) {
                 fails++;
                 std::cout << "MISMATCH idx " << idx << " got " << logits[idx] << " want " << want << "\n";
             }
@@ -817,7 +912,8 @@ int selftest(const char* argv0) {
         st.reset(b);
         std::cout << "policy ok-check (" << ms << " ms), nnue eval " << st.evaluate(b) << " cp (stm)  " << fen << "\n";
     }
-    std::cout << (fails ? "SELFTEST FAILED" : "SELFTEST PASSED") << "\n";
+    if (!cases) { std::cout << "no policy reference file\n"; fails++; }
+    std::cout << "policy v" << policy::NET.version << ": " << (fails ? "SELFTEST FAILED" : "SELFTEST PASSED") << "\n";
     return fails ? 1 : 0;
 }
 
@@ -854,6 +950,10 @@ int main(int argc, char* argv_in[]) {
             g_threads = std::clamp(std::atoi(argv_in[++i]), 1, 256);
             continue;
         }
+        if (std::string(argv_in[i]) == "--syzygy" && i + 1 < argc) {
+            g_syzygy = argv_in[++i];
+            continue;
+        }
         args.push_back(argv_in[i]);
     }
     argc = static_cast<int>(args.size());
@@ -865,10 +965,19 @@ int main(int argc, char* argv_in[]) {
         return 1;
     }
     if (!load_networks(argv[0])) return 2;
+    init_tablebases(argv[0]);
 
     std::string mode = argv[1];
     if (mode == "--selftest") return selftest(argv[0]);
     if (mode == "--test") return tests::run(argv[0]);
+    if (mode == "--eval") {   // static NNUE eval of each FEN argument (side to move's view)
+        for (int i = 2; i < argc; i++) {
+            Board b(argv[i]);
+            S.nn.reset(b);
+            std::cout << S.nn.evaluate(b) << " cp  " << argv[i] << "\n";
+        }
+        return 0;
+    }
     if (mode == "--bench") return bench(argc >= 3 ? std::stoll(argv[2]) : 2000);
 
     if (mode == "--server") {

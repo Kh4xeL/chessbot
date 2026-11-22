@@ -45,6 +45,7 @@ inline void nnue_incremental() {
                 const Move m = ml[std::uniform_int_distribution<int>(0, ml.size() - 1)(rng)];
                 st->push(b, m);
                 b.makeMove(m);
+                st->finish(b);
                 played.push_back(m);
                 nnue::refresh(ref, b);
                 positions++;
@@ -100,6 +101,9 @@ inline void mates() {
         RootResult r = search_root(Board(c.fen), 20, 3000, 1, false);
         const bool ok = !r.moves.empty() && chess::uci::moveToUci(r.moves[0].move) == c.best &&
                         r.moves[0].score == MATE - c.mate_plies;
+        if (!ok && !r.moves.empty())
+            std::cout << "  got " << chess::uci::moveToUci(r.moves[0].move) << " score " << r.moves[0].score
+                      << " depth " << r.depth << " pv " << pv_string(r.moves[0].pv, 40) << "\n";
         check(ok, std::string("mate: ") + c.name);
     }
 }
@@ -115,11 +119,48 @@ inline void repetition() {
     check(S.negamax(b, 4, -INF, INF, 1, true) == 0, "repeated position scores as a draw");
 }
 
+inline void tablebase() {
+    if (!tb::enabled) { std::cout << "SKIP  tablebases not found\n"; return; }
+    struct Case { const char* fen; unsigned wdl; const char* name; };
+    const Case cases[] = {
+        {"8/8/8/8/8/5k2/8/K1Q5 w - - 0 1", TB_WIN, "KQvK is a win"},
+        {"8/8/8/8/8/5k2/8/KN6 w - - 0 1", TB_DRAW, "KNvK is a draw"},
+        {"8/8/8/4k3/8/8/3KP3/8 w - - 0 1", TB_WIN, "KPvK with the opposition is a win"},
+    };
+    for (const auto& c : cases) {
+        tb::RootInfo info;
+        check(tb::probe_root(Board(c.fen), info) && info.wdl == c.wdl, std::string("tablebase: ") + c.name);
+    }
+    // The engine converts a won KRvK quickly instead of shuffling.
+    std::ostringstream out;
+    run_go("8/8/8/4k3/8/8/8/R3K3 w - - 0 1", {}, 3000, 99, 300, out);
+    const std::string o = out.str();
+    check(o.find("TABLEBASE:1") != std::string::npos && o.find("EVAL:90") != std::string::npos,
+          "engine reports the tablebase win");
+    // ... and actually wins it: play the engine against itself from KRvK to mate.
+    Board g("8/8/8/4k3/8/8/8/R3K3 w - - 0 1");
+    int plies = 0;
+    for (; plies < 80; plies++) {
+        Movelist ml;
+        chess::movegen::legalmoves(ml, g);
+        if (ml.empty()) break;
+        std::ostringstream o2;
+        run_go(g.getFen(), {}, 3000, 99, 100, o2);
+        const std::string t = o2.str();
+        const auto p = t.find("BEST_MOVE:");
+        g.makeMove(chess::uci::uciToMove(g, t.substr(p + 10, t.find('\n', p) - p - 10)));
+    }
+    Movelist end;
+    chess::movegen::legalmoves(end, g);
+    check(end.empty() && g.inCheck(), "KRvK converted to mate in " + std::to_string(plies) + " plies");
+}
+
 inline int run(const char* argv0) {
     nnue_incremental();
     see();
     mates();
     repetition();
+    tablebase();
     check(selftest(argv0) == 0, "CNN policy matches PyTorch reference");
     std::cout << (fails ? "TESTS FAILED (" + std::to_string(fails) + ")" : std::string("ALL TESTS PASSED")) << "\n";
     return fails ? 1 : 0;

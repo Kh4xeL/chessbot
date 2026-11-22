@@ -641,7 +641,7 @@
                     board.position(game.fen());
                     updateStatus();
                     if (data.eval_pawns !== undefined) {
-                        updateMaterialBar(data.eval_pawns, game.in_checkmate(), data.mate);
+                        updateMaterialBar(data.eval_pawns, game.in_checkmate(), data.mate, data.tablebase);
                         playEvals.push({ evalPawns: data.eval_pawns, mate: data.mate });
                     } else {
                         playEvals.push(null);
@@ -670,10 +670,13 @@
         window.currentMoveIndex = -1;
 
         // mate: mate in N moves from the engine (+ White mates, - Black mates), or null
-        function updateMaterialBar(eval_pawns, is_checkmate = false, mate = null) {
+        // tablebase: 1 / 0 / -1 when the endgame tablebase knows the result (White's view)
+        function updateMaterialBar(eval_pawns, is_checkmate = false, mate = null, tablebase = null) {
             var wPct = 50 + (eval_pawns * 4);
             var label = (eval_pawns > 0 ? '+' : '') + Number(eval_pawns).toFixed(1);
             if (is_checkmate) { wPct = eval_pawns > 0 ? 100 : 0; label = '#'; }
+            else if (tablebase === 0) { wPct = 50; label = 'TB =' }
+            else if (tablebase === 1 || tablebase === -1) { wPct = tablebase > 0 ? 97 : 3; label = tablebase > 0 ? 'TB +' : 'TB −'; }
             else if (mate !== null && mate !== undefined) { wPct = mate > 0 ? 100 : 0; label = (mate > 0 ? 'M' : '-M') + Math.abs(mate); }
             else { if (wPct > 95) wPct = 95; if (wPct < 5) wPct = 5; }
             $('#whiteMaterialBar').css('height', wPct + '%');
