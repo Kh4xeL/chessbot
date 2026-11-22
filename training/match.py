@@ -49,9 +49,9 @@ OPENINGS = [  # (name, moves) - common, roughly balanced lines
 class EnginePlayer:
     """Our engine in --server mode. Gets the full game so it can see repetitions."""
 
-    def __init__(self, path, ms, elo=3000, threads=1):
+    def __init__(self, path, ms, elo=3000, threads=1, cwd=ROOT):
         self.ms, self.elo = ms, elo
-        self.p = subprocess.Popen([path, "--server", "--threads", str(threads)], cwd=ROOT, text=True, bufsize=1,
+        self.p = subprocess.Popen([path, "--server", "--threads", str(threads)], cwd=cwd, text=True, bufsize=1,
                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
         assert self.p.stdout.readline().strip() == "READY"
 
@@ -97,7 +97,8 @@ def play(game_idx, args):
         board.push_uci(u)
     ours = EnginePlayer(ENGINE_PATH, args.ms, args.our_elo, args.threads)
     if args.opponent:
-        opp = EnginePlayer(os.path.abspath(args.opponent), args.opp_ms or args.ms, 3000, args.opp_threads)
+        opp = EnginePlayer(os.path.abspath(args.opponent), args.opp_ms or args.ms, 3000, args.opp_threads,
+                           os.path.abspath(args.opp_cwd) if args.opp_cwd else ROOT)
     else:
         opp = StockfishPlayer(args.sf_ms or args.ms, args.elo)
     try:
@@ -128,6 +129,7 @@ def main():
     ap.add_argument("--opp-ms", type=int, default=0, help="opponent engine time per move (default: same as --ms)")
     ap.add_argument("--threads", type=int, default=1, help="our search threads")
     ap.add_argument("--opp-threads", type=int, default=1, help="opponent engine search threads")
+    ap.add_argument("--opp-cwd", default="", help="working directory for the opponent (its assets/ = its networks)")
     ap.add_argument("--parallel", type=int, default=6)
     ap.add_argument("--our-elo", type=int, default=3000, help="our engine's Elo setting (3000 = full strength)")
     args = ap.parse_args()
