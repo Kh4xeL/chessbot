@@ -121,8 +121,11 @@ inline int run() {
                  "option name Move Overhead type spin default 30 min 0 max 5000\n"
                  "option name SyzygyPath type string default <empty>\n"
                  "option name UCI_LimitStrength type check default false\n"
-                 "option name UCI_Elo type spin default 2900 min 800 max 2900\n"
-                 "uciok");
+                 "option name UCI_Elo type spin default 2900 min 800 max 2900");
+            for (const auto& p : tune::all())
+                send("option name " + std::string(p.name) + " type spin default " + std::to_string(p.def) +
+                     " min " + std::to_string(p.min) + " max " + std::to_string(p.max));
+            send("uciok");
         } else if (cmd == "isready") {
             send("readyok");
         } else if (cmd == "ucinewgame") {
@@ -141,6 +144,12 @@ inline int run() {
             else if (name == "SyzygyPath" && !value.empty() && value != "<empty>") tb::init(value);
             else if (name == "UCI_LimitStrength") opt.limit_strength = value == "true";
             else if (name == "UCI_Elo") opt.elo = std::atoi(value.c_str());
+            else
+                for (auto& p : tune::all())
+                    if (name == p.name) {
+                        *p.value = std::clamp(std::atoi(value.c_str()), p.min, p.max);
+                        init_lmr();
+                    }
         } else if (cmd == "position") {
             wait();
             std::string tok;

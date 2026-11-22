@@ -71,6 +71,56 @@ constexpr int MAX_PLY = 128;
 constexpr int TB_WIN_SCORE = 28000;        // tablebase win (minus ply), below mate scores
 constexpr int TB_BOUND = TB_WIN_SCORE - 1000;
 
+// ---------------------------------------------------------------------------
+// Search parameters. Each one is also a UCI spin option (same name), so SPSA
+// tuners can set them; defaults are the tuned values.
+// ---------------------------------------------------------------------------
+namespace tune {
+struct Param {
+    const char* name;
+    int* value;
+    int def, min, max;
+};
+inline std::vector<Param>& all() {
+    static std::vector<Param> params;
+    return params;
+}
+struct Reg {
+    Reg(const char* name, int* v, int mn, int mx) { all().push_back({name, v, *v, mn, mx}); }
+};
+}  // namespace tune
+#define TUNE(name, def, mn, mx) \
+    int name = def;             \
+    tune::Reg name##_reg(#name, &name, mn, mx);
+
+TUNE(rfp_depth, 6, 3, 10)
+TUNE(rfp_margin, 80, 30, 160)
+TUNE(nmp_base, 3, 1, 5)
+TUNE(nmp_div, 4, 2, 8)
+TUNE(pc_depth, 5, 3, 8)
+TUNE(pc_margin, 200, 80, 400)
+TUNE(pc_improving, 50, 0, 150)
+TUNE(se_depth, 8, 5, 12)
+TUNE(se_mult, 2, 1, 5)
+TUNE(lmp_base, 2, 1, 6)
+TUNE(lmp_imp_base, 4, 2, 10)
+TUNE(see_depth, 6, 3, 10)
+TUNE(see_quiet, 60, 20, 150)
+TUNE(see_noisy, 100, 40, 200)
+TUNE(lmr_base, 75, 0, 150)     // reduction = base/100 + ln(d) ln(m) / (div/100)
+TUNE(lmr_div, 225, 150, 400)
+TUNE(qs_delta, 200, 50, 400)
+TUNE(asp_delta, 25, 8, 60)
+TUNE(hist_max_bonus, 400, 100, 1200)
+TUNE(counter_bonus, 700, 0, 2000)   // in thousands, ordering score of the counter-move
+
+int LMR[64][64] = {};
+inline void init_lmr() {
+    for (int d = 1; d < 64; d++)
+        for (int m = 1; m < 64; m++)
+            LMR[d][m] = static_cast<int>(lmr_base / 100.0 + std::log(d) * std::log(m) / (lmr_div / 100.0));
+}
+
 // Score shown to users: mates as +-100 pawns, tablebase wins as +-90, else unchanged.
 inline int display_cp(int s) {
     if (s >= MATE_BOUND) return 10000;
@@ -244,13 +294,6 @@ struct Search {
     Frame ss[MAX_PLY + 4];
     Move pv[MAX_PLY][MAX_PLY];
     int pv_len[MAX_PLY] = {};
-    int lmr[64][64] = {};
-
-    Search() {
-        for (int d = 1; d < 64; d++)
-            for (int m = 1; m < 64; m++)
-                lmr[d][m] = static_cast<int>(0.75 + std::log(d) * std::log(m) / 2.25);
-    }
 
     long long elapsed_ms() const {
         return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start)
@@ -382,7 +425,7 @@ struct Search {
             if (killers[ply][0] == m.move()) return 900'000;
             if (killers[ply][1] == m.move()) return 800'000;
             if (ply > 0 && ss[ply - 1].piece >= 0 && counter[ss[ply - 1].piece][ss[ply - 1].to] == m.move())
-                return 700'000;
+                return counter_bonus * 1000;
             return quiet_score(b, m, ply);
         }
         const int c = b.sideToMove() == chess::Color::WHITE ? 0 : 1;
@@ -449,7 +492,7 @@ struct Search {
             if (!in_check && m.typeOf() != Move::PROMOTION) {
                 auto victim = m.typeOf() == Move::ENPASSANT ? chess::PieceType(chess::PieceType::PAWN)
                                                              : b.at<chess::PieceType>(m.to());
-                if (stand + piece_value(victim) + 200 < alpha) continue;
+                if (stand + piece_value(victim) + qs_delta < alpha) continue;
                 // Losing captures can't improve a quiet position.
                 if (!see_ge(b, m, 0)) continue;
             }
@@ -529,7 +572,7 @@ struct Search {
 
         if (!pv_node && !in_check) {
             // Reverse futility pruning
-            if (depth <= 6 && static_eval - 80 * (depth - improving) >= beta && std::abs(beta) < MATE_BOUND)
+            if (depth <= rfp_depth && static_eval - rfp_margin * (depth - improving) >= beta && std::abs(beta) < MATE_BOUND)
                 return static_eval;
 
             // Null move pruning. Not with less than a rook or two minors: in such endgames
@@ -537,7 +580,7 @@ struct Search {
             const int npm = 3 * (b.pieces(chess::PieceType::KNIGHT, stm).count() + b.pieces(chess::PieceType::BISHOP, stm).count()) +
                             5 * b.pieces(chess::PieceType::ROOK, stm).count() + 9 * b.pieces(chess::PieceType::QUEEN, stm).count();
             if (allow_null && !excluded && depth >= 3 && static_eval >= beta && npm >= 5) {
-                const int R = 3 + depth / 4;
+                const int R = nmp_base + depth / nmp_div;
                 ss[ply].piece = -1;
                 nn.push_null();
                 b.makeNullMove();
@@ -550,8 +593,8 @@ struct Search {
 
             // ProbCut: a capture that beats beta by a clear margin in a shallow search
             // almost surely beats beta in the full one, so cut here.
-            const int pc_beta = beta + 200 - 50 * improving;
-            if (!excluded && depth >= 5 && std::abs(beta) < MATE_BOUND &&
+            const int pc_beta = beta + pc_margin - pc_improving * improving;
+            if (!excluded && depth >= pc_depth && std::abs(beta) < MATE_BOUND &&
                 !(tt_hit && tte.depth >= depth - 3 && score_from_tt(tte.score, ply) < pc_beta)) {
                 Movelist caps;
                 chess::movegen::legalmoves<chess::movegen::MoveGenType::CAPTURE>(caps, b);
@@ -588,10 +631,10 @@ struct Search {
         // (searched at reduced depth with it excluded), search it one ply deeper. If even
         // the alternatives beat beta, this node fails high without searching further.
         int singular_ext = 0;
-        if (ply > 0 && depth >= 8 && tt_hit && tt_move && !excluded && tte.depth >= depth - 3 &&
+        if (ply > 0 && depth >= se_depth && tt_hit && tt_move && !excluded && tte.depth >= depth - 3 &&
             tte.bound != BOUND_UPPER && std::abs(tte.score) < TB_BOUND) {
             const int tt_score = score_from_tt(tte.score, ply);
-            const int sbeta = tt_score - 2 * depth;
+            const int sbeta = tt_score - se_mult * depth;
             ss[ply].excluded = tt_move;
             const int v = negamax(b, (depth - 1) / 2, sbeta - 1, sbeta, ply, false);
             ss[ply].excluded = 0;
@@ -617,12 +660,12 @@ struct Search {
 
             // Late move pruning: at shallow depth skip late quiet moves outright.
             if (!pv_node && !in_check && quiet && best > -MATE_BOUND && depth <= 3 &&
-                searched >= (improving ? 4 + depth * depth * 2 : 2 + depth * depth))
+                searched >= (improving ? lmp_imp_base + depth * depth * 2 : lmp_base + depth * depth))
                 continue;
 
             // SEE pruning: at shallow depth skip moves that lose too much material outright.
-            if (!pv_node && !in_check && searched > 0 && best > -MATE_BOUND && depth <= 6 &&
-                !see_ge(b, m, quiet ? -60 * depth : -100 * depth))
+            if (!pv_node && !in_check && searched > 0 && best > -MATE_BOUND && depth <= see_depth &&
+                !see_ge(b, m, quiet ? -see_quiet * depth : -see_noisy * depth))
                 continue;
 
             ss[ply].piece = moved_piece(b, m);
@@ -635,7 +678,7 @@ struct Search {
             } else {
                 int R = 0;
                 if (depth >= 3 && searched >= (pv_node ? 3 : 2) && quiet && !in_check && !gives_check) {
-                    R = lmr[std::min(depth, 63)][std::min(searched, 63)];
+                    R = LMR[std::min(depth, 63)][std::min(searched, 63)];
                     if (pv_node) R--;
                     if (!improving) R++;
                     if (m.move() == killers[ply][0] || m.move() == killers[ply][1]) R--;
@@ -667,7 +710,7 @@ struct Search {
                             if (ply > 0 && ss[ply - 1].piece >= 0) counter[ss[ply - 1].piece][ss[ply - 1].to] = m.move();
                             // Reward the cutoff move, penalise the quiets tried before it, in the
                             // butterfly table and both continuation tables.
-                            const int bonus = std::min(depth * depth, 400);
+                            const int bonus = std::min(depth * depth, hist_max_bonus);
                             for (int q = 0; q < n_quiets; q++) {
                                 const Move qm = quiets_tried[q];
                                 const int delta = (qm == m) ? bonus : -bonus;
@@ -767,7 +810,7 @@ RootResult iterate(Search& T, Board board, std::vector<RootMove> rms, int max_de
             int s;
             if (alpha == -INF && depth >= 5 && rm.exact && std::abs(rm.score) < MATE_BOUND) {
                 // Aspiration window around last iteration's score; widen on a fail.
-                int delta = 25, lo = rm.score - delta, hi = rm.score + delta;
+                int delta = asp_delta, lo = rm.score - delta, hi = rm.score + delta;
                 while (true) {
                     s = -T.negamax(board, depth - 1, -hi, -lo, 1, true);
                     if (T.stop) break;
@@ -1149,6 +1192,7 @@ int bench(long long ms) {
 #include "uci.hpp"
 
 int main(int argc, char* argv_in[]) {
+    init_lmr();
     std::ios::sync_with_stdio(false);
     // "--threads N" may appear anywhere; strip it before the positional arguments are read.
     std::vector<char*> args;
