@@ -34,3 +34,6 @@ tools/
 cmake-build-*/
 .cache/
 .claude/
+
+# Local planning notes
+ROADMAP.md
