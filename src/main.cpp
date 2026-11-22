@@ -180,6 +180,15 @@ struct Search {
 
     std::uint16_t killers[MAX_PLY][2] = {};
     int history[2][64][64] = {};
+    // Continuation history: how a quiet move (piece, to) did right after a given
+    // previous move (piece, to), one and two plies back. Pieces are 0..11.
+    std::vector<std::int16_t> cont = std::vector<std::int16_t>(12 * 64 * 12 * 64, 0);
+    std::uint16_t counter[12][64] = {};   // quiet move that refuted the previous move
+    struct Frame {
+        int piece = -1;   // piece moved at this ply (-1: none / null move)
+        int to = 0;
+    };
+    Frame ss[MAX_PLY + 4];
     Move pv[MAX_PLY][MAX_PLY];
     int pv_len[MAX_PLY] = {};
     int lmr[64][64] = {};
@@ -276,7 +285,35 @@ struct Search {
         return res;
     }
 
-    int score_move(const Board& b, const Move& m, std::uint16_t tt_move, int ply) const {
+    static int moved_piece(const Board& b, const Move& m) {
+        return (b.sideToMove() == chess::Color::WHITE ? 0 : 6) + static_cast<int>(b.at<chess::PieceType>(m.from()));
+    }
+    static int dest(const Move& m) {
+        const int from = m.from().index(), to = m.to().index();
+        return m.typeOf() == Move::CASTLING ? (from & 56) + (to > from ? 6 : 2) : to;
+    }
+    std::int16_t* cont_entry(int ply, int back, int piece, int to) {
+        if (ply < back) return nullptr;
+        const Frame& f = ss[ply - back];
+        if (f.piece < 0) return nullptr;
+        return &cont[((static_cast<size_t>(f.piece) * 64 + f.to) * 12 + piece) * 64 + to];
+    }
+    int quiet_score(const Board& b, const Move& m, int ply) {
+        const int c = b.sideToMove() == chess::Color::WHITE ? 0 : 1;
+        const int piece = moved_piece(b, m), to = dest(m);
+        int sc = history[c][m.from().index()][m.to().index()];
+        if (auto* e = cont_entry(ply, 1, piece, to)) sc += *e;
+        if (auto* e = cont_entry(ply, 2, piece, to)) sc += *e;
+        return sc;
+    }
+    static void gravity(int& h, int delta) { h += delta - h * std::abs(delta) / 16384; }
+    static void gravity16(std::int16_t& h, int delta) {
+        int v = h;
+        v += delta - v * std::abs(delta) / 16384;
+        h = static_cast<std::int16_t>(std::clamp(v, -16384, 16384));
+    }
+
+    int score_move(Board& b, const Move& m, std::uint16_t tt_move, int ply) {
         if (m.move() == tt_move) return 10'000'000;
         const bool promo = m.typeOf() == Move::PROMOTION;
         if (b.isCapture(m)) {
@@ -291,6 +328,9 @@ struct Search {
         if (ply < MAX_PLY) {
             if (killers[ply][0] == m.move()) return 900'000;
             if (killers[ply][1] == m.move()) return 800'000;
+            if (ply > 0 && ss[ply - 1].piece >= 0 && counter[ss[ply - 1].piece][ss[ply - 1].to] == m.move())
+                return 700'000;
+            return quiet_score(b, m, ply);
         }
         const int c = b.sideToMove() == chess::Color::WHITE ? 0 : 1;
         return history[c][m.from().index()][m.to().index()];
@@ -418,6 +458,7 @@ struct Search {
                             5 * b.pieces(chess::PieceType::ROOK, stm).count() + 9 * b.pieces(chess::PieceType::QUEEN, stm).count();
             if (allow_null && depth >= 3 && static_eval >= beta && npm >= 5) {
                 const int R = 3 + depth / 4;
+                ss[ply].piece = -1;
                 nn.push_null();
                 b.makeNullMove();
                 int s = -negamax(b, depth - 1 - R, -beta, -beta + 1, ply + 1, false);
@@ -440,7 +481,7 @@ struct Search {
         Move best_move = Move(Move::NO_MOVE);
         const int orig_alpha = alpha;
         int searched = 0;
-        std::uint16_t quiets_tried[256];
+        Move quiets_tried[256];
         int n_quiets = 0;
 
         for (int i = 0; i < moves.size(); i++) {
@@ -458,6 +499,8 @@ struct Search {
                 !see_ge(b, m, quiet ? -60 * depth : -100 * depth))
                 continue;
 
+            ss[ply].piece = moved_piece(b, m);
+            ss[ply].to = dest(m);
             make(b, m);
             const bool gives_check = b.inCheck();
             int s;
@@ -478,7 +521,7 @@ struct Search {
             unmake(b, m);
             if (stop) return 0;
             searched++;
-            if (quiet && n_quiets < 256) quiets_tried[n_quiets++] = m.move();
+            if (quiet && n_quiets < 256) quiets_tried[n_quiets++] = m;
 
             if (s > best) {
                 best = s;
@@ -494,12 +537,17 @@ struct Search {
                                 killers[ply][1] = killers[ply][0];
                                 killers[ply][0] = m.move();
                             }
+                            if (ply > 0 && ss[ply - 1].piece >= 0) counter[ss[ply - 1].piece][ss[ply - 1].to] = m.move();
+                            // Reward the cutoff move, penalise the quiets tried before it, in the
+                            // butterfly table and both continuation tables.
                             const int bonus = std::min(depth * depth, 400);
                             for (int q = 0; q < n_quiets; q++) {
-                                Move qm(quiets_tried[q]);
-                                int& h = history[c][qm.from().index()][qm.to().index()];
-                                int delta = (quiets_tried[q] == m.move()) ? bonus : -bonus;
-                                h += delta - h * std::abs(delta) / 16384;
+                                const Move qm = quiets_tried[q];
+                                const int delta = (qm == m) ? bonus : -bonus;
+                                gravity(history[c][qm.from().index()][qm.to().index()], delta);
+                                const int pc = moved_piece(b, qm), to = dest(qm);
+                                if (auto* e = cont_entry(ply, 1, pc, to)) gravity16(*e, delta);
+                                if (auto* e = cont_entry(ply, 2, pc, to)) gravity16(*e, delta);
                             }
                         }
                         break;
@@ -570,6 +618,7 @@ RootResult iterate(Search& T, Board board, std::vector<RootMove> rms, int max_de
     for (auto& side : T.history)
         for (auto& row : side)
             for (auto& h : row) h /= 2;
+    for (auto& h : T.cont) h /= 2;
 
     const int K = std::max(1, std::min(multipv, static_cast<int>(rms.size())));
     res.moves = rms;
@@ -583,6 +632,8 @@ RootResult iterate(Search& T, Board board, std::vector<RootMove> rms, int max_de
         for (size_t i = 0; i < cur.size(); i++) {
             RootMove& rm = cur[i];
             int alpha = static_cast<int>(exact_scores.size()) >= K ? exact_scores[K - 1] : -INF;
+            T.ss[0].piece = Search::moved_piece(board, rm.move);
+            T.ss[0].to = Search::dest(rm.move);
             T.make(board, rm.move);
             int s;
             if (alpha == -INF && depth >= 5 && rm.exact && std::abs(rm.score) < MATE_BOUND) {
