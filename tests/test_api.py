@@ -128,3 +128,16 @@ def test_analyze_position_lines(client):
     for line in r["lines"]:
         assert chess.Move.from_uci(line["uci"][0]) in board.legal_moves
         assert len(line["san"]) == len(line["uci"])
+
+
+TABLEBASES = os.path.isfile(os.path.join(ROOT, "tools", "syzygy", "KQvK.rtbw"))
+
+
+@pytest.mark.skipif(not TABLEBASES, reason="Syzygy tablebases not downloaded")
+def test_tablebase_result_reported(client):
+    won = post(client, "/get_move", fen="8/8/8/4k3/8/8/8/R3K3 w - - 0 1", elo=3000, time_limit=300)
+    assert won["tablebase"] == 1
+    drawn = post(client, "/get_move", fen="8/8/8/8/8/5k2/8/KN6 w - - 0 1", elo=3000, time_limit=300)
+    assert drawn["tablebase"] == 0
+    middlegame = post(client, "/get_move", fen=MIDDLEGAME, elo=3000, time_limit=200)
+    assert middlegame["tablebase"] is None

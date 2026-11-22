@@ -311,6 +311,7 @@ def calculate_move(request: MoveRequest):
         best_move = None
         eval_score = 0.0
         mate_in = None
+        tablebase = None
         depth_reached = 0
         top_moves = []
         user_top_moves = []
@@ -330,6 +331,11 @@ def calculate_move(request: MoveRequest):
                     eval_score = float(line.split(":")[1].strip())
                 except ValueError:
                     eval_score = 0.0
+            elif line.startswith("TABLEBASE:"):
+                try:
+                    tablebase = int(line.split(":")[1].strip())
+                except ValueError:
+                    tablebase = None
             elif line.startswith("MATE:"):
                 try:
                     mate_in = int(line.split(":")[1].strip())
@@ -377,6 +383,7 @@ def calculate_move(request: MoveRequest):
                 "depth_reached": depth_reached,
                 "eval_pawns": eval_score,
                 "mate": mate_in,  # mate in N moves (+ White mates, - Black mates), else None
+                "tablebase": tablebase,  # 1 / 0 / -1: White wins / draw / loses with best play (5 pieces or fewer)
                 "time": calculation_time,
                 "top_3": top_moves,
                 "user_top_3": user_top_3,
