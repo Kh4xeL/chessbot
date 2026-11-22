@@ -129,7 +129,10 @@ python scripts/download_syzygy.py        # 3-4-5 piece Syzygy tables into tools/
 The engine finds them in `tools/syzygy` (or `--syzygy DIR` / `$SYZYGY_PATH`). Without them it simply searches endgames normally.
 
 ### 3. Use the engine directly (optional)
+The engine speaks **UCI**, so any chess GUI (CuteChess, Arena, Banksia) or match runner can use it. Start it with no arguments. It supports these options: `Threads`, `MultiPV`, `Move Overhead`, `SyzygyPath`, `UCI_LimitStrength` and `UCI_Elo`.
+
 ```bash
+engine                                        # UCI
 engine "<fen>" [elo] [max_depth] [time_ms]   # one search, prints the result block
 engine --server [--threads N] [--syzygy DIR]  # persistent, see below
 engine --eval "<fen>" ...                     # static NNUE evaluation
@@ -149,6 +152,26 @@ pytest tests/
 ```
 
 GitHub Actions runs both on every push to `main` and on every pull request (`.github/workflows/ci.yml`).
+
+### 5. Test whether a change gains Elo (SPRT)
+`scripts/test_change.py` plays a new build against a base build with [fastchess](https://github.com/Disservin/fastchess) (put it in `tools/fastchess/`).
+* **Setup:** fixed nodes per move over 5,000 balanced openings (`tests/openings.epd`), each played with both colours.
+* **SPRT:** a sequential test that stops as soon as the result is clear.
+* **Inputs:** engines can be `.exe` paths or git refs; refs are built in a worktree automatically.
+* **Log:** every result goes to `data/tests.csv`.
+
+```bash
+python scripts/test_change.py --new my-branch --base main                # gainer: SPRT [0, 5]
+python scripts/test_change.py --new HEAD --base main --elo0 -5 --elo1 0  # "no worse" check
+```
+
+**Speed:** about 13,000 games an hour at 20k nodes/move with 6 games in parallel.
+
+**Checks of the harness:**
+* the same build against itself: −0.0 ± 11.8 Elo over 2,000 games;
+* full strength against the Elo-2400 setting: a gain accepted after 304 games.
+
+`scripts/make_openings.py` rebuilds the opening suite from the Lichess games data.
 
 ---
 
@@ -188,9 +211,9 @@ python/         api.py (FastAPI bridge), semantic_analysis.py (post-game review)
 web/            index.html, tree.js / tree.css (analysis move tree)
 training/       prepare_data.py, prepare_games.py, label_fens.py, train_nnue.py, train_policy.py,
                 export_policy.py, match.py
-scripts/        download_syzygy.py
+scripts/        download_syzygy.py, make_openings.py, test_change.py (SPRT)
 assets/         nnue.bin, policy_elo.bin, policy_cnn.bin (+ test vectors), traced_alphazero.pt, book.bin
-tests/          API tests (pytest)
+tests/          API and UCI tests (pytest), openings.epd
 ```
 
 ## Known limitations

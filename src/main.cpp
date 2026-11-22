@@ -10,6 +10,7 @@
  *   killer/history move ordering, check extensions and quiescence search.
  *
  * Usage:
+ *   engine                                     UCI protocol (chess GUIs, fastchess, cutechess); also --uci
  *   engine <fen> [elo] [max_depth] [time_ms]   one search, then exit
  *   engine --server                            read commands from stdin:
  *       go <elo> <max_depth> <time_ms> <fen> [moves m1 m2 ...]   prints the result block, then END
@@ -37,10 +38,12 @@
 
 #include <algorithm>
 #include <atomic>
+#include <climits>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <memory>
 #include <random>
@@ -148,8 +151,22 @@ inline int score_from_tt(int s, int ply) {
 // ---------------------------------------------------------------------------
 // Search state
 // ---------------------------------------------------------------------------
-// Set by the main thread when time is up; every search thread polls it.
+// Set by the main thread when time is up (or by UCI "stop"); every search thread polls it.
 std::atomic<bool> g_stop{false};
+
+struct RootResult;
+
+// Extra limits for the next search, used by UCI. soft_ms: don't start a new iteration
+// after this (default: 60% of the hard limit); nodes: stop the main thread after this
+// many nodes; infinite: keep searching until stopped.
+struct Limits {
+    long long soft_ms = -1;
+    std::uint64_t nodes = 0;
+    bool infinite = false;
+};
+Limits g_limits;
+// Called by the main thread after every completed iteration (UCI "info" lines).
+std::function<void(const RootResult&)> g_on_iteration;
 
 struct Search {
     nnue::Stack nn;
@@ -159,6 +176,7 @@ struct Search {
     bool is_main = true;      // only the main thread checks the clock
     std::chrono::steady_clock::time_point start;
     long long time_limit_ms = 1000;
+    std::uint64_t node_limit = 0;   // 0 = none
 
     std::uint16_t killers[MAX_PLY][2] = {};
     int history[2][64][64] = {};
@@ -178,7 +196,9 @@ struct Search {
     }
 
     void check_time() {
-        if (is_main && (nodes & 2047) == 0 && elapsed_ms() >= time_limit_ms) stop = true;
+        if (!is_main) return;
+        if (node_limit && nodes >= node_limit) stop = true;   // exact, so fixed-node games are reproducible
+        else if ((nodes & 2047) == 0 && elapsed_ms() >= time_limit_ms) stop = true;
     }
 
     void make(Board& b, const Move& m) { nn.push(b, m); b.makeMove(m); nn.finish(b); }
@@ -542,6 +562,8 @@ RootResult iterate(Search& T, Board board, std::vector<RootMove> rms, int max_de
     RootResult res;
     T.nodes = 0;
     T.time_limit_ms = std::max(1LL, time_ms);
+    T.node_limit = T.is_main ? g_limits.nodes : 0;
+    const long long soft_ms = g_limits.infinite ? LLONG_MAX : (g_limits.soft_ms >= 0 ? g_limits.soft_ms : time_ms * 6 / 10);
     T.start = std::chrono::steady_clock::now();
     T.nn.reset(board);
     std::memset(T.killers, 0, sizeof(T.killers));
@@ -619,9 +641,12 @@ RootResult iterate(Search& T, Board board, std::vector<RootMove> rms, int max_de
                       << chess::uci::moveToUci(cur[0].move) << " score=" << cur[0].score << "\n";
         }
         if (!T.is_main) continue;
+        res.nodes = T.nodes;
+        if (g_on_iteration) g_on_iteration(res);
+        if (g_limits.infinite) continue;
         if (std::abs(cur[0].score) >= MATE_BOUND && depth >= 4) break;     // forced mate found
         // Don't start an iteration that probably can't re-search the best move in time.
-        if (res.ms * 10 > time_ms * 6) break;
+        if (res.ms > soft_ms) break;
     }
     res.nodes = T.nodes;
     res.ms = T.elapsed_ms();
@@ -940,6 +965,7 @@ int bench(long long ms) {
 }
 
 #include "tests.hpp"
+#include "uci.hpp"
 
 int main(int argc, char* argv_in[]) {
     std::ios::sync_with_stdio(false);
@@ -959,13 +985,10 @@ int main(int argc, char* argv_in[]) {
     argc = static_cast<int>(args.size());
     char** argv = args.data();
 
-    if (argc < 2) {
-        std::cerr << "usage: engine <fen> [elo] [depth] [time_ms] | --server | --selftest | --bench [ms]"
-                     "   (any mode: --threads N)\n";
-        return 1;
-    }
     if (!load_networks(argv[0])) return 2;
     init_tablebases(argv[0]);
+    // No arguments (how chess GUIs and match tools start an engine) or --uci: UCI protocol.
+    if (argc < 2 || std::string(argv[1]) == "--uci") return uci_mode::run();
 
     std::string mode = argv[1];
     if (mode == "--selftest") return selftest(argv[0]);
