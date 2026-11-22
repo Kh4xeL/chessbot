@@ -5,7 +5,9 @@ A chess engine with a built-in tutor. You play it in the browser, and it shows y
 Under the hood it pairs two networks, each where it works best:
 
 * **An NNUE evaluator** sits inside a classical alpha-beta search. It judges positions in about a microsecond, so the engine can look 12–20 moves deep in a second or two.
-* **An AlphaZero-style CNN** (our original model) supplies "intuition" at the root. It decides which moves to look at first and, at lower Elo settings, which reasonable move a human would pick.
+* **A rating-aware CNN** predicts the move a human of a given rating would play. It runs once at the root. It decides which moves to look at first and, at lower Elo settings, which reasonable move a player of that rating would pick.
+
+With 5 pieces or fewer, **Syzygy endgame tablebases** give the exact result and the fastest winning move.
 
 | | Before (CNN at every leaf) | Now (NNUE + CNN at the root) |
 |---|---|---|
@@ -13,6 +15,7 @@ Under the hood it pairs two networks, each where it works best:
 | Depth in 1–2 s | 3–4 | 14–20 |
 | Strength vs Stockfish's Elo limiter (1 thread, 0.3 s/move) | not measured | ~2860 |
 | Average centipawn loss, same 47 positions from a real game | 32 | 21 |
+| Human move prediction (top-1, Lichess games) | 39.2% (original CNN) | 48.9% (rating-aware CNN) |
 | Runtime dependencies | LibTorch (~2 GB) | none (plain C++17) |
 
 Full-strength Stockfish is still far ahead: even with 3 s per move against Stockfish's 0.1 s, the engine lost all 10 games, lasting 57 moves on average.
@@ -32,9 +35,10 @@ Full-strength Stockfish is still far ahead: even with 3 s per move against Stock
              └──────────────────────────────────────┬────────────────────────────────────┘
                                                     │ stdin/stdout, a pool of long-lived processes
              ┌──────────────────────── engine (src/, C++17) ─────────────────────────────┐
-             │  root:   CNN policy (policy_net.hpp) → move order, human-like choice      │
+             │  root:   rating-aware CNN (policy_net.hpp) → move order, human-like choice│
              │  search: Lazy SMP, iterative deepening, PVS, TT, SEE, LMR, quiescence     │
              │  leaves: NNUE (nnue.hpp), updated incrementally move by move              │
+             │  ≤5 pieces: Syzygy tablebases via Fathom (tablebase.hpp)                  │
              └───────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -42,30 +46,57 @@ Full-strength Stockfish is still far ahead: even with 3 s per move against Stock
 * **Shape:** `768 → 2×512 → 1` with SCReLU. The input is one-hot piece-squares, seen from both the side to move and the opponent.
 * **Training data:** 76M positions with Stockfish evaluations from the [Lichess evaluation database](https://database.lichess.org/#evals). Only "quiet" positions are kept: not in check, and the best move is not a capture.
 * **Why it's fast:** a move only changes 2–4 pieces. Instead of recomputing the network, the engine adds and subtracts those few weight rows. The first layer is int16-quantized.
+* **Tried and not adopted:** two changes that usually help, each A/B-tested over 300 games:
+  * A "v2" network with king buckets (the board seen relative to each king, mirrored) and separate output layers by piece count.
+  * 5.75M extra positions from real Lichess games, labelled by Stockfish and blended with the game results.
 
-### The CNN policy (`src/policy_net.hpp`)
-* **Model:** our original 4-block residual CNN (13×8×8 input), trained on human games. Only its policy head is used now.
-* **No LibTorch:** BatchNorm is folded into the convolutions and the forward pass is plain C++. It runs once per move in about 3 ms.
-* **Self-test:** `engine --selftest` checks its output against PyTorch (also part of `engine --test`).
+  Neither beat this network: every variant landed within ±20 Elo of it, inside the margin of error. The engine and `train_nnue.py --arch v2` still support v2 networks.
+
+### The rating-aware policy (`src/policy_net.hpp`)
+* **Model:** a 6-block × 96-channel residual CNN, in the spirit of Maia. Its input is:
+  * the board from the side to move's view;
+  * castling rights;
+  * both players' ratings, given as constant input planes.
+
+  A convolutional head scores every from-to move.
+* **Training data:** 85.8M positions from 9.4M rated Lichess games (October 2026), excluding bullet and abandoned games. Positions are capped per 100-Elo band, so 600–1000 and 2400+ players are well represented.
+* **Accuracy:** it predicts the human's actual move 48.9% of the time, against 39.2% for the original CNN on the same positions. By rating:
+
+  | Rating | 600 | 1000 | 1400 | 1800 | 2200 | 2400 |
+  |---|---|---|---|---|---|---|
+  | Top-1 | 43.6% | 48.4% | 49.7% | 50.0% | 48.8% | 47.9% |
+
+  The rating input matters. Told that 400–799 players are rated 2500, it predicts their moves 36.8% of the time instead of 42.3%.
+* **No LibTorch:** BatchNorm is folded into the convolutions and the forward pass is plain C++ (about 3 ms). The original AlphaZero-style CNN (`policy_cnn.bin`) is still supported as a fallback.
+* **Self-test:** `engine --selftest` checks the C++ output against PyTorch (also part of `engine --test`).
+
+### Endgame tablebases (`src/tablebase.hpp`)
+* **What:** Syzygy 3–5 piece tables (WDL + DTZ, ~940 MB), probed through [Fathom](https://github.com/jdart1/Fathom) (MIT, in `include/fathom/`).
+* **In the search:** win/draw/loss probes after captures and pawn moves.
+* **At the root:**
+  * only moves that keep the theoretical result are searched;
+  * when winning, the engine plays the fastest-converting move. It mates with KRvK in 25 plies from a test position.
+* **For the tutor:** the API reports the result (`tablebase`), and the eval bar shows "TB +", "TB =" or "TB −".
+* **Below 2200 Elo** the bot ignores the tables and plays endgames by its own judgement.
 
 ### The search (`src/main.cpp`)
 * **Core:** iterative deepening with Multi-PV at the root, so the tutor's top 3 moves have exact scores, plus aspiration windows.
 * **Threads:** Lazy SMP. Helper threads share a lock-free transposition table (`--threads N`). 4 threads gained about +160 Elo over 1.
-* **Pruning:** principal variation search, null-move pruning, reverse futility pruning, late move reductions, late move pruning and SEE pruning.
+* **Pruning:** principal variation search, null-move pruning (off with less than a rook or two minor pieces, where zugzwang is common), reverse futility pruning, late move reductions, late move pruning and SEE pruning.
 * **Move ordering:** hash move, captures ranked by static exchange evaluation (SEE), then killer and history heuristics, plus check extensions.
 * **Quiescence search:** follows captures to the end, skipping losing ones (SEE) and hopeless ones (delta pruning).
 * **Game history:** the API sends the game's moves, so the search sees repetitions.
 * **Elo setting:**
   * At 2900 or above it plays at full strength.
-  * Below that it caps the depth and picks among near-best moves. Each move is weighted by its score and by how natural the CNN thinks it is, so weaker settings play plausible human moves rather than random blunders.
-  * Calibrated against Stockfish's Elo limiter, 40 games per point: 1400 → ~1480, 1800 → ~1880, 2200 → ~2190, 2600 → ~2590. Below 1400 the setting is extrapolated, because Stockfish can't be limited that low.
+  * Below that it caps the depth and picks among near-best moves. Each move is weighted by its score and by how likely a player of that rating is to play it (the rating-aware CNN), so weaker settings play the moves such players actually make rather than random blunders.
+  * Calibrated against Stockfish's Elo limiter, 40 games per point: 1400 → ~1490, 1800 → ~1870, 2200 → ~2190, 2600 → ~2630. Below 1400 the setting is extrapolated, because Stockfish can't be limited that low.
 
 ---
 
 ## Getting started
 
 ### 1. Build the engine
-You need a C++17 compiler and CMake, nothing else.
+You need a C and C++17 compiler and CMake, nothing else.
 
 * **CLion:** open the folder and build the `engine` target in the Release profile. The output goes to `cmake-build-release/`.
 * **Terminal:**
@@ -91,10 +122,17 @@ Open <http://127.0.0.1:8000>.
 * The API finds the engine in `cmake-build-release/` or `build/`. It runs `ENGINE_PROCESSES` (default 3) engines with `ENGINE_THREADS` (default 4) threads each, so hints and threat checks don't wait behind the bot's move.
 * Stockfish, used only for post-game analysis, is found through `STOCKFISH_PATH`, your `PATH`, `tools/` or Homebrew.
 
+### Endgame tablebases (optional, ~940 MB)
+```bash
+python scripts/download_syzygy.py        # 3-4-5 piece Syzygy tables into tools/syzygy
+```
+The engine finds them in `tools/syzygy` (or `--syzygy DIR` / `$SYZYGY_PATH`). Without them it simply searches endgames normally.
+
 ### 3. Use the engine directly (optional)
 ```bash
 engine "<fen>" [elo] [max_depth] [time_ms]   # one search, prints the result block
-engine --server [--threads N]                 # persistent, see below
+engine --server [--threads N] [--syzygy DIR]  # persistent, see below
+engine --eval "<fen>" ...                     # static NNUE evaluation
 ```
 
 In server mode the commands are:
@@ -102,7 +140,7 @@ In server mode the commands are:
 * `newgame`
 * `quit`
 
-Each `go` prints a block of `BEST_MOVE`, `EVAL`, `MATE`, `DEPTH_REACHED` and `RANK` lines, ending with `END`.
+Each `go` prints a block of `BEST_MOVE`, `EVAL`, `MATE`, `TABLEBASE`, `DEPTH_REACHED` and `RANK` lines, ending with `END`.
 
 ### 4. Run the tests
 ```bash
@@ -114,38 +152,57 @@ GitHub Actions runs both on every push to `main` and on every pull request (`.gi
 
 ---
 
-## Retraining the NNUE
-This needs a CUDA GPU. On an RTX 5070 Ti, training takes about 5 minutes; streaming the data takes about an hour.
+## Retraining
+Training needs a CUDA GPU. On an RTX 5070 Ti each network trains in about 5–30 minutes; streaming and labelling the data take longer.
 
+**NNUE**
 ```bash
-python training/prepare_data.py --max-lines 110000000   # streams the Lichess eval DB into data/ (~2.5 GB)
-python training/train_nnue.py --epochs 15               # writes assets/nnue.bin
-python training/match.py --elo 2400 --games 40          # strength check vs limited Stockfish
-python training/match.py --elo 0 --ms 3000 --sf-ms 100  # vs full-strength Stockfish
-python training/match.py --opponent old/engine.exe --games 120 --ms 100   # A/B test two builds
+python training/prepare_data.py --max-lines 110000000      # Lichess eval DB -> data/ (~1 h, ~2.5 GB)
+python training/label_fens.py --workers 6                  # optional: label game positions with Stockfish
+python training/train_nnue.py --arch v1 --data data        # writes assets/nnue.bin (v2: --arch v2)
 ```
 
-`training/export_policy.py` re-exports `assets/policy_cnn.bin` from `assets/traced_alphazero.pt`.
+**Rating-aware policy**
+```bash
+python training/prepare_games.py --games 10000000          # stream rated games -> data/policy (~3 GB download)
+python training/train_policy.py --epochs 2                 # writes assets/policy_elo.bin (~30 min)
+```
+
+**Measuring strength**
+```bash
+python training/match.py --elo 2400 --games 40             # vs Stockfish's Elo limiter
+python training/match.py --elo 1800 --our-elo 1800         # check one Elo-slider setting
+python training/match.py --opponent cmake-build-release/engine.exe --opp-cwd old_nets/ --games 300
+                                                           # A/B: the opponent loads old_nets/assets/*
+```
+
+`training/export_policy.py` re-exports the original CNN (`assets/policy_cnn.bin`) from `assets/traced_alphazero.pt`.
 
 ---
 
 ## Project layout
 ```
-src/            engine: main.cpp (search + protocol), nnue.hpp, policy_net.hpp, tests.hpp
-include/        chess.hpp (move generation, by Disservin)
+src/            engine: main.cpp (search + protocol), nnue.hpp, policy_net.hpp, tablebase.hpp, tests.hpp
+include/        chess.hpp (move generation, by Disservin), fathom/ (Syzygy probing, MIT)
 python/         api.py (FastAPI bridge), semantic_analysis.py (post-game review)
 web/            index.html, tree.js / tree.css (analysis move tree)
-training/       prepare_data.py, train_nnue.py, export_policy.py, match.py
-assets/         nnue.bin, policy_cnn.bin (+ test vectors), traced_alphazero.pt, book.bin
+training/       prepare_data.py, prepare_games.py, label_fens.py, train_nnue.py, train_policy.py,
+                export_policy.py, match.py
+scripts/        download_syzygy.py
+assets/         nnue.bin, policy_elo.bin, policy_cnn.bin (+ test vectors), traced_alphazero.pt, book.bin
 tests/          API tests (pytest)
 ```
 
 ## Known limitations
 * **Rough Elo numbers:** they come from short matches (±100 Elo) against Stockfish's own Elo limiter, not from a rating list.
-* **No endgame tablebases:** endgames are played by search alone.
-* **Human-like but not human:** the CNN that makes weaker settings human-like was trained on all ratings together, not per rating band.
+* **Tablebases are optional:** they aren't in the repository (940 MB). Without them, endgames are played by search alone.
+* **Human-like, not human:** weaker settings pick moves real players of that rating make, but the bot doesn't simulate time pressure or tilt.
 
 ## Credits
 * A university experiment in hybrid ML and classical game-playing systems.
-* Training data: the [Lichess evaluation database](https://database.lichess.org/#evals) (CC0). Move generation: [chess-library](https://github.com/Disservin/chess-library). Analysis and benchmarking: [Stockfish](https://stockfishchess.org/).
+* **Training data:** the [Lichess evaluation database](https://database.lichess.org/#evals) and [rated game archives](https://database.lichess.org/) (both CC0). The rating-aware policy follows the idea of [Maia](https://maiachess.com/).
+* **Libraries and tools:**
+  * move generation: [chess-library](https://github.com/Disservin/chess-library);
+  * tablebase probing: [Fathom](https://github.com/jdart1/Fathom), with tables from the Lichess mirror;
+  * labelling, analysis and benchmarking: [Stockfish](https://stockfishchess.org/).
 * Code comments, parts of the frontend, and the NNUE engine rewrite were written with AI assistance.
