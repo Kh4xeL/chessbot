@@ -509,6 +509,33 @@ struct Search {
                 if (stop) return 0;
                 if (s >= beta) return s >= MATE_BOUND ? beta : s;
             }
+
+            // ProbCut: a capture that beats beta by a clear margin in a shallow search
+            // almost surely beats beta in the full one, so cut here.
+            const int pc_beta = beta + 200 - 50 * improving;
+            if (!excluded && depth >= 5 && std::abs(beta) < MATE_BOUND &&
+                !(tt_hit && tte.depth >= depth - 3 && score_from_tt(tte.score, ply) < pc_beta)) {
+                Movelist caps;
+                chess::movegen::legalmoves<chess::movegen::MoveGenType::CAPTURE>(caps, b);
+                int cs[256];
+                for (int i = 0; i < caps.size(); i++) cs[i] = score_move(b, caps[i], tt_move, MAX_PLY);
+                for (int i = 0; i < caps.size(); i++) {
+                    pick(caps, cs, i);
+                    const Move m = caps[i];
+                    if (!see_ge(b, m, pc_beta - static_eval)) continue;
+                    ss[ply].piece = moved_piece(b, m);
+                    ss[ply].to = dest(m);
+                    make(b, m);
+                    int s = -qsearch(b, -pc_beta, -pc_beta + 1, ply + 1);
+                    if (s >= pc_beta) s = -negamax(b, depth - 4, -pc_beta, -pc_beta + 1, ply + 1, true);
+                    unmake(b, m);
+                    if (stop) return 0;
+                    if (s >= pc_beta) {
+                        tt_store(key, score_to_tt(s, ply), m.move(), depth - 3, BOUND_LOWER);
+                        return s;
+                    }
+                }
+            }
         }
 
         Movelist moves;
