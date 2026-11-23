@@ -13,7 +13,7 @@ With 5 pieces or fewer, **Syzygy endgame tablebases** give the exact result and 
 |---|---|---|
 | Positions evaluated per second | ~700 | ~1.8M per thread, ~7.6M with 4 threads |
 | Depth in 1–2 s | 3–4 | 14–20 |
-| Strength vs Stockfish's Elo limiter (1 thread, 0.3 s/move) | not measured | ~2860 |
+| Strength vs Stockfish's Elo limiter (1 thread, 0.3 s/move) | not measured | ~2860 before the search work below (+140 Elo since) |
 | Average centipawn loss, same 47 positions from a real game | 32 | 21 |
 | Human move prediction (top-1, Lichess games) | 39.2% (original CNN) | 48.9% (rating-aware CNN) |
 | Runtime dependencies | LibTorch (~2 GB) | none (plain C++17) |
@@ -82,9 +82,26 @@ Full-strength Stockfish is still far ahead: even with 3 s per move against Stock
 ### The search (`src/main.cpp`)
 * **Core:** iterative deepening with Multi-PV at the root, so the tutor's top 3 moves have exact scores, plus aspiration windows.
 * **Threads:** Lazy SMP. Helper threads share a lock-free transposition table (`--threads N`). 4 threads gained about +160 Elo over 1.
-* **Pruning:** principal variation search, null-move pruning (off with less than a rook or two minor pieces, where zugzwang is common), reverse futility pruning, late move reductions, late move pruning and SEE pruning.
-* **Move ordering:** hash move, captures ranked by static exchange evaluation (SEE), then killer and history heuristics, plus check extensions.
-* **Quiescence search:** follows captures to the end, skipping losing ones (SEE) and hopeless ones (delta pruning).
+* **Pruning:** principal variation search, null-move pruning (off with less than a rook or two minor pieces, where zugzwang is common), reverse futility pruning, ProbCut, late move reductions, late move pruning and SEE pruning. Pruning is stricter when the side to move's eval is falling ("improving" flag).
+* **Extensions:** check extensions, and singular extensions with multi-cut. When the hash move is much better than every alternative, it is searched one ply deeper.
+* **Move ordering:** hash move, captures ranked by static exchange evaluation (SEE), then killers, counter-moves, and history with continuation history (what worked after the previous 1–2 moves).
+* **Transposition table:** 64 MB in 4-slot buckets, each one cache line. Entries carry the search that wrote them, so leftovers from earlier moves are replaced first.
+* **Quiescence search:** follows captures to the end, skipping losing ones (SEE) and hopeless ones (delta pruning). It reads and writes the hash table.
+* **Tuning:** 20 search constants are UCI options (`rfp_margin`, `lmr_div`, …). Their defaults come from 60,000 SPSA games (`scripts/spsa.py`).
+* **Measured gains (SPRT, 20k nodes/move, each against the previous step):**
+
+  | Change | Elo |
+  |---|---|
+  | continuation history + counter-moves | +15 ± 8 |
+  | improving flag | +19 ± 9 |
+  | singular extensions | +11 ± 7 |
+  | hash table in quiescence | +21 ± 10 |
+  | ProbCut | +25 ± 11 |
+  | TT buckets + aging | +0 ± 4 (kept: it matters once the table fills in longer searches) |
+  | SPSA-tuned constants | +58 ± 17 |
+  | **all of the above vs the previous main, 10 s + 0.1 s per game** | **+140 ± 23** |
+
+  History-adjusted LMR was tried and dropped (−1 ± 4).
 * **Game history:** the API sends the game's moves, so the search sees repetitions.
 * **Elo setting:**
   * At 2900 or above it plays at full strength.
@@ -172,6 +189,12 @@ python scripts/test_change.py --new HEAD --base main --elo0 -5 --elo1 0  # "no w
 * full strength against the Elo-2400 setting: a gain accepted after 304 games.
 
 `scripts/make_openings.py` rebuilds the opening suite from the Lichess games data.
+
+**Tuning:** `scripts/spsa.py` tunes the search constants with SPSA. It saves its state after every batch, so a run can be stopped and resumed. `--workers 2 --concurrency 6` plays 12 games at once.
+
+```bash
+python scripts/spsa.py --engine cmake-build-release/engine.exe --iterations 2500 --workers 2
+```
 
 ---
 
