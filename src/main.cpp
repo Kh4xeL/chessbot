@@ -1190,6 +1190,7 @@ int bench(long long ms) {
 
 #include "tests.hpp"
 #include "uci.hpp"
+#include "datagen.hpp"
 
 int main(int argc, char* argv_in[]) {
     init_lmr();
@@ -1227,6 +1228,12 @@ int main(int argc, char* argv_in[]) {
         return 0;
     }
     if (mode == "--bench") return bench(argc >= 3 ? std::stoll(argv[2]) : 2000);
+    if (mode == "--datagen") {   // --datagen <out_dir> [games] [nodes] [seed]
+        if (argc < 3) { std::cerr << "usage: engine --datagen <out_dir> [games] [nodes] [seed]\n"; return 1; }
+        return datagen::run(argv[2], argc >= 4 ? std::stoll(argv[3]) : 1'000'000,
+                            argc >= 5 ? std::stoull(argv[4]) : 5000,
+                            argc >= 6 ? static_cast<unsigned>(std::stoul(argv[5])) : std::random_device{}());
+    }
 
     if (mode == "--server") {
         std::string line;

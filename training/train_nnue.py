@@ -120,7 +120,13 @@ def export(model, path, hidden, layout, mirror, n_ob):
 
 def load_dir(d, limit=0):
     stm = np.fromfile(os.path.join(d, "stm.u8"), np.uint8)
-    n = len(stm) if not limit else min(limit, len(stm))
+    # a generator stopped mid-write can leave the files a record apart: use the common length
+    sizes = [len(stm), os.path.getsize(os.path.join(d, "boards.u8")) // 32,
+             os.path.getsize(os.path.join(d, "scores.i16")) // 2]
+    rp = os.path.join(d, "results.u8")
+    if os.path.exists(rp):
+        sizes.append(os.path.getsize(rp))
+    n = min(sizes) if not limit else min(limit, *sizes)
     boards = np.fromfile(os.path.join(d, "boards.u8"), np.uint8, count=n * 32).reshape(n, 32)
     scores = np.fromfile(os.path.join(d, "scores.i16"), np.int16, count=n)
     rp = os.path.join(d, "results.u8")
