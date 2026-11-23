@@ -13,7 +13,7 @@ With 5 pieces or fewer, **Syzygy endgame tablebases** give the exact result and 
 |---|---|---|
 | Positions evaluated per second | ~700 | ~1.8M per thread, ~7.6M with 4 threads |
 | Depth in 1–2 s | 3–4 | 14–20 |
-| Strength vs Stockfish's Elo limiter (1 thread, 0.3 s/move) | not measured | ~2860 before the search work below (+140 Elo since) |
+| Strength vs Stockfish's Elo limiter (1 thread, 0.3 s/move) | not measured | ~2800 (2809 ± 51 vs SF 2800, 2783 ± 50 vs SF 3000; 150 games each) |
 | Average centipawn loss, same 47 positions from a real game | 32 | 21 |
 | Human move prediction (top-1, Lichess games) | 39.2% (original CNN) | 48.9% (rating-aware CNN) |
 | Runtime dependencies | LibTorch (~2 GB) | none (plain C++17) |
@@ -106,7 +106,8 @@ Full-strength Stockfish is still far ahead: even with 3 s per move against Stock
 * **Elo setting:**
   * At 2900 or above it plays at full strength.
   * Below that it caps the depth and picks among near-best moves. Each move is weighted by its score and by how likely a player of that rating is to play it (the rating-aware CNN), so weaker settings play the moves such players actually make rather than random blunders.
-  * Calibrated against Stockfish's Elo limiter, 40 games per point: 1400 → ~1490, 1800 → ~1870, 2200 → ~2190, 2600 → ~2630. Below 1400 the setting is extrapolated, because Stockfish can't be limited that low.
+  * Calibrated against Stockfish's Elo limiter, 150 games per point at 0.3 s/move (`scripts/calibrate_elo.py`): 1400 → ~1435, 1800 → ~1868, 2200 → ~2177, 2600 → ~2553, each ± 50–57. Below 1400 the setting is extrapolated, because Stockfish can't be limited that low.
+  * The Phase 1 search gains barely move these points: limited settings cap the depth (about 9 plies at 1800, 14 at 2600), and most of the new pruning pays off deeper than that.
 
 ---
 
