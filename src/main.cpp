@@ -93,26 +93,26 @@ struct Reg {
     int name = def;             \
     tune::Reg name##_reg(#name, &name, mn, mx);
 
-TUNE(rfp_depth, 6, 3, 10)
-TUNE(rfp_margin, 80, 30, 160)
-TUNE(nmp_base, 3, 1, 5)
-TUNE(nmp_div, 4, 2, 8)
-TUNE(pc_depth, 5, 3, 8)
-TUNE(pc_margin, 200, 80, 400)
-TUNE(pc_improving, 50, 0, 150)
-TUNE(se_depth, 8, 5, 12)
+TUNE(rfp_depth, 4, 3, 10)
+TUNE(rfp_margin, 96, 30, 160)
+TUNE(nmp_base, 2, 1, 5)
+TUNE(nmp_div, 3, 2, 8)
+TUNE(pc_depth, 3, 3, 8)
+TUNE(pc_margin, 189, 80, 400)
+TUNE(pc_improving, 57, 0, 150)
+TUNE(se_depth, 5, 5, 12)
 TUNE(se_mult, 2, 1, 5)
-TUNE(lmp_base, 2, 1, 6)
+TUNE(lmp_base, 1, 1, 6)
 TUNE(lmp_imp_base, 4, 2, 10)
-TUNE(see_depth, 6, 3, 10)
-TUNE(see_quiet, 60, 20, 150)
-TUNE(see_noisy, 100, 40, 200)
-TUNE(lmr_base, 75, 0, 150)     // reduction = base/100 + ln(d) ln(m) / (div/100)
-TUNE(lmr_div, 225, 150, 400)
-TUNE(qs_delta, 200, 50, 400)
-TUNE(asp_delta, 25, 8, 60)
-TUNE(hist_max_bonus, 400, 100, 1200)
-TUNE(counter_bonus, 700, 0, 2000)   // in thousands, ordering score of the counter-move
+TUNE(see_depth, 7, 3, 10)
+TUNE(see_quiet, 50, 20, 150)
+TUNE(see_noisy, 96, 40, 200)
+TUNE(lmr_base, 79, 0, 150)     // reduction = base/100 + ln(d) ln(m) / (div/100)
+TUNE(lmr_div, 201, 150, 400)
+TUNE(qs_delta, 204, 50, 400)
+TUNE(asp_delta, 21, 8, 60)
+TUNE(hist_max_bonus, 405, 100, 1200)
+TUNE(counter_bonus, 815, 0, 2000)   // in thousands, ordering score of the counter-move
 
 int LMR[64][64] = {};
 inline void init_lmr() {

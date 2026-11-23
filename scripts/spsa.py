@@ -26,6 +26,7 @@ import random
 import re
 import subprocess
 import sys
+import threading
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from test_change import FASTCHESS, ROOT  # noqa: E402
@@ -70,7 +71,8 @@ def main():
     ap.add_argument("--iterations", type=int, default=2500)
     ap.add_argument("--pairs", type=int, default=12, help="game pairs per iteration")
     ap.add_argument("--nodes", type=int, default=20000)
-    ap.add_argument("--concurrency", type=int, default=6)
+    ap.add_argument("--concurrency", type=int, default=6, help="games at once per batch")
+    ap.add_argument("--workers", type=int, default=1, help="batches played at the same time")
     ap.add_argument("--r-end", type=float, default=0.002)
     ap.add_argument("--c-frac", type=float, default=0.05, help="c_end as a fraction of each option's range")
     ap.add_argument("--state", default=os.path.join(ROOT, "data", "spsa", "state.json"))
@@ -98,28 +100,46 @@ def main():
         p["c"] = c_end * n ** GAMMA
         p["a"] = args.r_end * c_end ** 2 * (big_a + n) ** ALPHA
 
-    while state["k"] < n:
-        k = state["k"] + 1
-        plus, minus, delta = {}, {}, {}
-        for name, p in params.items():
-            ck = p["c"] / k ** GAMMA
-            delta[name] = random.choice((-1, 1))
-            plus[name] = min(p["max"], max(p["min"], p["value"] + ck * delta[name]))
-            minus[name] = min(p["max"], max(p["min"], p["value"] - ck * delta[name]))
-        w, l, d = play(exe, plus, minus, args.pairs, args.nodes, args.concurrency)
-        for name, p in params.items():
-            ak, ck = p["a"] / (big_a + k) ** ALPHA, p["c"] / k ** GAMMA
-            p["value"] = min(p["max"], max(p["min"], p["value"] + ak / ck * (w - l) * delta[name]))
-        state["k"] = k
-        state["history"].append({"k": k, "w": w, "l": l, "d": d,
-                                 "values": {name: round(p["value"], 2) for name, p in params.items()}})
-        tmp = args.state + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(state, f, indent=1)
-        os.replace(tmp, args.state)
-        if k % 10 == 0 or k == n:
-            vals = "  ".join(f"{name}={p['value']:.1f}" for name, p in params.items())
-            print(f"iter {k}/{n}  +{w} -{l} ={d}  {vals}", flush=True)
+    # Several batches can run at once (--workers), each from the current parameters, as
+    # on a distributed tuner; finished batches are applied one at a time under a lock.
+    lock = threading.Lock()
+    started = [state["k"]]
+
+    def worker():
+        while True:
+            with lock:
+                if started[0] >= n:
+                    return
+                started[0] += 1
+                k = started[0]
+                plus, minus, delta = {}, {}, {}
+                for name, p in params.items():
+                    ck = p["c"] / k ** GAMMA
+                    delta[name] = random.choice((-1, 1))
+                    plus[name] = min(p["max"], max(p["min"], p["value"] + ck * delta[name]))
+                    minus[name] = min(p["max"], max(p["min"], p["value"] - ck * delta[name]))
+            w, l, d = play(exe, plus, minus, args.pairs, args.nodes, args.concurrency)
+            with lock:
+                for name, p in params.items():
+                    ak, ck = p["a"] / (big_a + k) ** ALPHA, p["c"] / k ** GAMMA
+                    p["value"] = min(p["max"], max(p["min"], p["value"] + ak / ck * (w - l) * delta[name]))
+                state["k"] += 1
+                done = state["k"]
+                state["history"].append({"k": done, "w": w, "l": l, "d": d,
+                                         "values": {name: round(p["value"], 2) for name, p in params.items()}})
+                tmp = args.state + ".tmp"
+                with open(tmp, "w") as f:
+                    json.dump(state, f, indent=1)
+                os.replace(tmp, args.state)
+                if done % 10 == 0 or done == n:
+                    vals = "  ".join(f"{name}={p['value']:.1f}" for name, p in params.items())
+                    print(f"iter {done}/{n}  +{w} -{l} ={d}  {vals}", flush=True)
+
+    threads = [threading.Thread(target=worker) for _ in range(args.workers)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
 
     print("\nTuned values (default -> tuned):")
     for name, p in params.items():
