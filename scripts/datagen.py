@@ -33,6 +33,7 @@ def main():
     ap.add_argument("--positions", type=int, default=30_000_000, help="stop once this many are on disk")
     args = ap.parse_args()
 
+    args.engine = os.path.abspath(args.engine)
     gen_dir = os.path.join(ROOT, "data", "selfplay", args.gen)
     procs = []
     for i in range(args.procs):
