@@ -163,22 +163,28 @@ def main():
     n = len(stm)
     print(f"{n:,} positions from {len(parts)} source(s); {int((results != 255).sum()):,} with game results")
 
+    # Targets are built on the CPU; the GPU holds only boards, stm and targets (37 bytes per
+    # position) plus the validation slice's raw scores.
     perm = np.random.default_rng(0).permutation(n)
-    boards_g = torch.from_numpy(boards[perm]).to(dev)
-    stm_g = torch.from_numpy(stm[perm]).to(dev)
-    cp_white = torch.from_numpy(scores[perm].astype(np.float32)).to(dev)
-    res_g = torch.from_numpy(results[perm]).to(dev)
-    del boards, perm
-    cp_stm = torch.where(stm_g == 1, cp_white, -cp_white)
-    eval_t = torch.sigmoid(cp_stm / SCALE)
-    has_res = res_g != 255
-    res_white = res_g.float() / 2
-    res_stm = torch.where(stm_g == 1, res_white, 1 - res_white)
-    target_g = torch.where(has_res, (1 - args.wdl) * eval_t + args.wdl * res_stm, eval_t)
-    del res_g, res_white, res_stm
+    stm = stm[perm]
+    white = stm == 1
+    cp = scores[perm].astype(np.float32)
+    cp_stm_np = np.where(white, cp, -cp)
+    eval_np = (1 / (1 + np.exp(-cp_stm_np / SCALE))).astype(np.float32)
+    res = results[perm]
+    res_stm = np.where(white, res / 2, 1 - res / 2).astype(np.float32)
+    target_np = np.where(res != 255, (1 - args.wdl) * eval_np + args.wdl * res_stm, eval_np).astype(np.float32)
+    del cp, res, res_stm, scores, results
 
     nv = args.val
     train_n = n - nv
+    boards_g = torch.from_numpy(boards[perm]).to(dev)
+    del boards, perm
+    stm_g = torch.from_numpy(stm).to(dev)
+    target_g = torch.from_numpy(target_np).to(dev)
+    eval_t = torch.from_numpy(eval_np[train_n:]).to(dev)      # validation slice only
+    cp_stm = torch.from_numpy(cp_stm_np[train_n:]).to(dev)
+    del stm, target_np, eval_np, cp_stm_np
     model = NNUE(args.hidden, n_kb, n_ob).to(dev)
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
     steps_per_epoch = train_n // args.batch
@@ -207,8 +213,8 @@ def main():
                 j = min(n, i + 65536)
                 us, them, ob = batch(i, j)
                 p = model(us, them, ob)
-                tot += ((torch.sigmoid(p) - eval_t[i:j]) ** 2).sum().item()
-                mae += (p * SCALE - cp_stm[i:j]).clamp(-SCALE * 4, SCALE * 4).abs().sum().item()
+                tot += ((torch.sigmoid(p) - eval_t[i - train_n:j - train_n]) ** 2).sum().item()
+                mae += (p * SCALE - cp_stm[i - train_n:j - train_n]).clamp(-SCALE * 4, SCALE * 4).abs().sum().item()
         model.train()
         return tot / nv, mae / nv
 
@@ -216,11 +222,11 @@ def main():
           f"{total_steps:,} steps ({args.epochs} epochs of {steps_per_epoch:,})")
     t0 = time.time()
     run, run_n = 0.0, 0
-    order = torch.randperm(train_n, device=dev)
+    order = torch.randperm(train_n, device=dev, dtype=torch.int32)
     while step < total_steps:
         k = step % steps_per_epoch
         if k == 0 and step > 0:
-            order = torch.randperm(train_n, device=dev)
+            order = torch.randperm(train_n, device=dev, dtype=torch.int32)
         idx = order[k * args.batch:(k + 1) * args.batch]
         us, them, ob = batch(0, idx=idx)
         pred = model(us, them, ob)
