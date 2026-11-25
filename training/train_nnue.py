@@ -118,6 +118,11 @@ def export(model, path, hidden, layout, mirror, n_ob):
         f.write(model.out.bias.detach().cpu().numpy().astype("<f4").tobytes())
 
 
+def shuffled(n, dev):
+    # on the CPU: torch.randperm on the GPU leaves ~3 GB of sort buffers in the cache
+    return torch.from_numpy(np.random.permutation(n).astype(np.int32)).to(dev)
+
+
 def load_dir(d, limit=0):
     stm = np.fromfile(os.path.join(d, "stm.u8"), np.uint8)
     # a generator stopped mid-write can leave the files a record apart: use the common length
@@ -224,11 +229,11 @@ def main():
           f"{total_steps:,} steps ({args.epochs} epochs of {steps_per_epoch:,})")
     t0 = time.time()
     run, run_n = 0.0, 0
-    order = torch.randperm(train_n, device=dev, dtype=torch.int32)
+    order = shuffled(train_n, dev)
     while step < total_steps:
         k = step % steps_per_epoch
         if k == 0 and step > 0:
-            order = torch.randperm(train_n, device=dev, dtype=torch.int32)
+            order = shuffled(train_n, dev)
         idx = order[k * args.batch:(k + 1) * args.batch]
         us, them, ob = batch(0, idx=idx)
         pred = model(us, them, ob)
