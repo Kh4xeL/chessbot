@@ -11,9 +11,9 @@ With 5 pieces or fewer, **Syzygy endgame tablebases** give the exact result and 
 
 | | Before (CNN at every leaf) | Now (NNUE + CNN at the root) |
 |---|---|---|
-| Positions evaluated per second | ~700 | ~1.8M per thread, ~7.6M with 4 threads |
+| Positions evaluated per second | ~700 | ~2.4M per thread, ~9.7M with 4 threads |
 | Depth in 1–2 s | 3–4 | 14–20 |
-| Strength vs Stockfish's Elo limiter (1 thread, 0.3 s/move) | not measured | ~2800 (2809 ± 51 vs SF 2800, 2783 ± 50 vs SF 3000; 150 games each) |
+| Strength vs Stockfish's Elo limiter (1 thread, 0.3 s/move) | not measured | ~3000 (−194 ± 44 vs SF 3190, the limiter's maximum; 150 games) |
 | Average centipawn loss, same 47 positions from a real game | 32 | 21 |
 | Human move prediction (top-1, Lichess games) | 39.2% (original CNN) | 48.9% (rating-aware CNN) |
 | Runtime dependencies | LibTorch (~2 GB) | none (plain C++17) |
@@ -44,13 +44,30 @@ Full-strength Stockfish is still far ahead: even with 3 s per move against Stock
 
 ### The NNUE (`src/nnue.hpp`)
 * **Shape:** `768 → 2×512 → 1` with SCReLU. The input is one-hot piece-squares, seen from both the side to move and the opponent.
-* **Training data:** 76M positions with Stockfish evaluations from the [Lichess evaluation database](https://database.lichess.org/#evals). Only "quiet" positions are kept: not in check, and the best move is not a capture.
-* **Why it's fast:** a move only changes 2–4 pieces. Instead of recomputing the network, the engine adds and subtracts those few weight rows. The first layer is int16-quantized.
-* **Tried and not adopted:** two changes that usually help, each A/B-tested over 300 games:
-  * A "v2" network with king buckets (the board seen relative to each king, mirrored) and separate output layers by piece count.
-  * 5.75M extra positions from real Lichess games, labelled by Stockfish and blended with the game results.
+* **Training data:** 262M quiet positions (not in check, best move not a capture):
+  * 76M with Stockfish evaluations from the [Lichess evaluation database](https://database.lichess.org/#evals);
+  * 6M from real Lichess games, labelled by Stockfish;
+  * 180M from the engine's own self-play games (below).
+* **Training target:** 70% the search score (as a win probability), 30% the game result where one is known.
+* **Self-play:** `engine --datagen` plays games against itself at 5,000 nodes per move from 8 random opening moves. It records the search score and the game's result for each quiet position. Games end early on a tablebase result or a long run of decisive or drawn scores. Each round adds 30M positions (about 4 hours on 6 cores) and retrains on everything so far:
 
-  Neither beat this network: every variant landed within ±20 Elo of it, inside the margin of error. The engine and `train_nnue.py --arch v2` still support v2 networks.
+  | Round | Positions | Elo vs the previous network |
+  |---|---|---|
+  | 1 | 112M | +107 ± 24 |
+  | 2 | 142M | +39 ± 14 |
+  | 3 | 172M | +26 ± 11 |
+  | 4 | 202M | +17 ± 9 |
+  | 5 | 232M | +14 ± 8 |
+  | 6 | 262M | +12 ± 8 |
+
+  Each was an SPRT at 20k nodes per move. With 262M positions, training uses 15 of 16 GB of GPU memory.
+* **Why it's fast:** a move only changes 2–4 pieces. Instead of recomputing the network, the engine adds and subtracts those few weight rows, in one pass per move. The first layer is int16-quantized, and the output layer uses AVX2. The AVX2 path and the one-pass update took the speed from 1.4M to 2.2M positions per second, worth +57 ± 14 Elo at 10 s + 0.1 s per game.
+* **Tried and not adopted:**
+  * A hidden layer of 1024 instead of 512: −12 ± 8 Elo at 10 s + 0.1 s per game. Its evaluations are more accurate (validation loss 0.0068 vs 0.0071 on round 3 data), but it is about 30% slower.
+  * A "v2" network with king buckets (the board seen relative to each king, mirrored) and separate output layers by piece count: −17 ± 13 Elo at 10 s + 0.1 s per game.
+  * A 50/50 mix of score and result as the target instead of 70/30: −33 ± 14 Elo at 20k nodes per move.
+
+  The engine and `train_nnue.py --arch v2 / --hidden` still support these networks.
 
 ### The rating-aware policy (`src/policy_net.hpp`)
 * **Model:** a 6-block × 96-channel residual CNN, in the spirit of Maia. Its input is:
@@ -106,8 +123,8 @@ Full-strength Stockfish is still far ahead: even with 3 s per move against Stock
 * **Elo setting:**
   * At 2900 or above it plays at full strength.
   * Below that it caps the depth and picks among near-best moves. Each move is weighted by its score and by how likely a player of that rating is to play it (the rating-aware CNN), so weaker settings play the moves such players actually make rather than random blunders.
-  * Calibrated against Stockfish's Elo limiter, 150 games per point at 0.3 s/move (`scripts/calibrate_elo.py`): 1400 → ~1435, 1800 → ~1868, 2200 → ~2177, 2600 → ~2553, each ± 50–57. Below 1400 the setting is extrapolated, because Stockfish can't be limited that low.
-  * The Phase 1 search gains barely move these points: limited settings cap the depth (about 9 plies at 1800, 14 at 2600), and most of the new pruning pays off deeper than that.
+  * Calibrated against Stockfish's Elo limiter, 150 games per point at 0.3 s/move (`scripts/calibrate_elo.py`): 1400 → ~1391, 1800 → ~1749, 2200 → ~2268, 2600 → ~2600, each ± 45–59. Below 1400 the setting is extrapolated, because Stockfish can't be limited that low.
+  * Limited settings cap the depth: 3 plies at 1400, 7 at 1800, 10 at 2200, 12 at 2600. The self-play networks made every setting 110–245 Elo stronger, so the caps and sampling temperatures were lowered to match.
 
 ---
 
@@ -207,6 +224,8 @@ Training needs a CUDA GPU. On an RTX 5070 Ti each network trains in about 5–30
 python training/prepare_data.py --max-lines 110000000      # Lichess eval DB -> data/ (~1 h, ~2.5 GB)
 python training/label_fens.py --workers 6                  # optional: label game positions with Stockfish
 python training/train_nnue.py --arch v1 --data data        # writes assets/nnue.bin (v2: --arch v2)
+python scripts/datagen.py --gen gen7 --procs 6             # self-play with the current net -> data/selfplay/gen7 (~4 h)
+python training/train_nnue.py --wdl 0.3 --data data data/games_labeled data/selfplay/gen*/part*
 ```
 
 **Rating-aware policy**
@@ -235,7 +254,8 @@ python/         api.py (FastAPI bridge), semantic_analysis.py (post-game review)
 web/            index.html, tree.js / tree.css (analysis move tree)
 training/       prepare_data.py, prepare_games.py, label_fens.py, train_nnue.py, train_policy.py,
                 export_policy.py, match.py
-scripts/        download_syzygy.py, make_openings.py, test_change.py (SPRT)
+scripts/        datagen.py (self-play), test_change.py (SPRT), spsa.py, calibrate_elo.py,
+                download_syzygy.py, make_openings.py
 assets/         nnue.bin, policy_elo.bin, policy_cnn.bin (+ test vectors), traced_alphazero.pt, book.bin
 tests/          API and UCI tests (pytest), openings.epd
 ```
