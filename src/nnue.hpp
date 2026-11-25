@@ -24,6 +24,9 @@
 #include <fstream>
 #include <string>
 #include <vector>
+#ifdef __AVX2__
+#include <immintrin.h>
+#endif
 
 #include "../include/chess.hpp"
 
@@ -164,13 +167,42 @@ inline int output(const Accumulator& a, bool white_to_move, int piece_count) {
     const int ob = std::clamp((piece_count - 2) / 4, 0, NET.n_ob - 1);
     const float* w = &NET.out_w[static_cast<size_t>(ob) * 2 * H];
     float s = 0.0f;
-    for (int i = 0; i < H; i++) {
-        int x = std::clamp<int>(us[i], 0, QA);
-        s += static_cast<float>(x * x) * w[i];
-    }
-    for (int i = 0; i < H; i++) {
-        int x = std::clamp<int>(them[i], 0, QA);
-        s += static_cast<float>(x * x) * w[H + i];
+#ifdef __AVX2__
+    if (H % 16 == 0) {
+        // SCReLU dot product, 16 neurons per step with 4 independent accumulators.
+        const __m256i lo = _mm256_setzero_si256(), hi = _mm256_set1_epi16(QA);
+        __m256 acc[4] = {_mm256_setzero_ps(), _mm256_setzero_ps(), _mm256_setzero_ps(), _mm256_setzero_ps()};
+        for (int side = 0; side < 2; side++) {
+            const std::int16_t* x = side == 0 ? us : them;
+            const float* ws = w + side * H;
+            for (int i = 0; i < H; i += 16) {
+                __m256i v = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(x + i));
+                v = _mm256_min_epi16(_mm256_max_epi16(v, lo), hi);
+                const __m256i a = _mm256_cvtepi16_epi32(_mm256_castsi256_si128(v));
+                const __m256i b = _mm256_cvtepi16_epi32(_mm256_extracti128_si256(v, 1));
+                const __m256 fa = _mm256_cvtepi32_ps(_mm256_mullo_epi32(a, a));
+                const __m256 fb = _mm256_cvtepi32_ps(_mm256_mullo_epi32(b, b));
+                const int k = (i >> 3) & 2;
+                acc[k] = _mm256_fmadd_ps(fa, _mm256_loadu_ps(ws + i), acc[k]);
+                acc[k + 1] = _mm256_fmadd_ps(fb, _mm256_loadu_ps(ws + i + 8), acc[k + 1]);
+            }
+        }
+        const __m256 t = _mm256_add_ps(_mm256_add_ps(acc[0], acc[1]), _mm256_add_ps(acc[2], acc[3]));
+        __m128 r = _mm_add_ps(_mm256_castps256_ps128(t), _mm256_extractf128_ps(t, 1));
+        r = _mm_add_ps(r, _mm_movehl_ps(r, r));
+        r = _mm_add_ss(r, _mm_shuffle_ps(r, r, 1));
+        s = _mm_cvtss_f32(r);
+    } else
+#endif
+    {
+        for (int i = 0; i < H; i++) {
+            int x = std::clamp<int>(us[i], 0, QA);
+            s += static_cast<float>(x * x) * w[i];
+        }
+        for (int i = 0; i < H; i++) {
+            int x = std::clamp<int>(them[i], 0, QA);
+            s += static_cast<float>(x * x) * w[H + i];
+        }
     }
     float out = s / static_cast<float>(QA * QA) + NET.out_b[ob];
     // Keep far away from the search's mate-score range.
