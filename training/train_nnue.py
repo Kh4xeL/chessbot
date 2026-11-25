@@ -160,8 +160,10 @@ def main():
     scores = np.concatenate([p[1] for p in parts])
     stm = np.concatenate([p[2] for p in parts])
     results = np.concatenate([p[3] for p in parts])
+    n_src = len(parts)
+    del parts
     n = len(stm)
-    print(f"{n:,} positions from {len(parts)} source(s); {int((results != 255).sum()):,} with game results")
+    print(f"{n:,} positions from {n_src} source(s); {int((results != 255).sum()):,} with game results")
 
     # Targets are built on the CPU; the GPU holds only boards, stm and targets (37 bytes per
     # position) plus the validation slice's raw scores.
