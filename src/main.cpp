@@ -929,14 +929,17 @@ RootResult search_root(Board board, int max_depth, long long time_ms, int multip
 // Full strength at >= 2900. Below that the search depth is capped and the move
 // is sampled among near-best candidates, weighted by how good the search thinks
 // each one is and by the CNN's "human intuition" for it.
-int depth_cap_for_elo(int elo) { return elo >= 2900 ? 99 : std::clamp((elo - 500) / 150, 1, 20); }
+int depth_cap_for_elo(int elo) {
+    if (elo >= 2900) return 99;
+    return std::clamp(elo < 1800 ? (elo - 1100) / 100 : (elo - 600) / 160, 1, 20);   // 1400: 3, 1800: 7, 2600: 12
+}
 
 size_t choose_move(const RootResult& r, int elo, std::mt19937& rng) {
     if (elo >= 2900 || r.moves.size() < 2) return 0;
     // Sampling temperature in centipawns, interpolated between points calibrated with
-    // training/match.py against Stockfish's UCI_Elo (1400 and up; below that extrapolated).
-    static const double pts[][2] = {{800, 420}, {1400, 300}, {1800, 95}, {2200, 70}, {2600, 40}, {2900, 8}};
-    double temp = 300;
+    // scripts/calibrate_elo.py against Stockfish's UCI_Elo (1400 and up; below that extrapolated).
+    static const double pts[][2] = {{800, 460}, {1400, 355}, {1800, 172}, {2200, 83}, {2600, 55}, {2900, 21}};
+    double temp = 460;
     for (size_t i = 1; i < std::size(pts); i++) {
         if (elo <= pts[i][0]) {
             const double t = std::clamp((elo - pts[i - 1][0]) / (pts[i][0] - pts[i - 1][0]), 0.0, 1.0);
@@ -1190,6 +1193,7 @@ int bench(long long ms) {
 
 #include "tests.hpp"
 #include "uci.hpp"
+#include "datagen.hpp"
 
 int main(int argc, char* argv_in[]) {
     init_lmr();
@@ -1227,6 +1231,12 @@ int main(int argc, char* argv_in[]) {
         return 0;
     }
     if (mode == "--bench") return bench(argc >= 3 ? std::stoll(argv[2]) : 2000);
+    if (mode == "--datagen") {   // --datagen <out_dir> [games] [nodes] [seed]
+        if (argc < 3) { std::cerr << "usage: engine --datagen <out_dir> [games] [nodes] [seed]\n"; return 1; }
+        return datagen::run(argv[2], argc >= 4 ? std::stoll(argv[3]) : 1'000'000,
+                            argc >= 5 ? std::stoull(argv[4]) : 5000,
+                            argc >= 6 ? static_cast<unsigned>(std::stoul(argv[5])) : std::random_device{}());
+    }
 
     if (mode == "--server") {
         std::string line;

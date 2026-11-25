@@ -25,6 +25,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FASTCHESS = [p for p in glob.glob(os.path.join(ROOT, "tools", "fastchess", "**", "fastchess*"), recursive=True)
@@ -110,11 +111,18 @@ def main():
 
     out = []
     proc = subprocess.Popen(cmd, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    watchdog = None
     for line in proc.stdout:
         out.append(line)
         if re.search(r"Elo:|LLR|Games:|SPRT|H0|H1", line):
             print(line.rstrip(), flush=True)
+        if "was accepted" in line and watchdog is None:
+            # fastchess sometimes hangs on exit with idle engines after the SPRT ends (Windows)
+            watchdog = threading.Timer(60, proc.kill)
+            watchdog.start()
     proc.wait()
+    if watchdog:
+        watchdog.cancel()
     text = "".join(out)
     with open(pgn[:-4] + ".log", "w", encoding="utf-8") as f:
         f.write(text)

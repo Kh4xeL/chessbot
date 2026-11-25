@@ -24,6 +24,9 @@
 #include <fstream>
 #include <string>
 #include <vector>
+#ifdef __AVX2__
+#include <immintrin.h>
+#endif
 
 #include "../include/chess.hpp"
 
@@ -118,6 +121,8 @@ inline int feature(int persp, const View& view, int color, int type, int sq) {
     return view.bucket * 768 + (color == persp ? 0 : 384) + type * 64 + s;
 }
 
+inline const std::int16_t* row(int feat) { return &NET.ft_w[static_cast<size_t>(feat) * NET.hidden]; }
+
 inline void add_row(std::int16_t* acc, int feat) {
     const std::int16_t* w = &NET.ft_w[static_cast<size_t>(feat) * NET.hidden];
     for (int i = 0; i < NET.hidden; i++) acc[i] += w[i];
@@ -164,13 +169,42 @@ inline int output(const Accumulator& a, bool white_to_move, int piece_count) {
     const int ob = std::clamp((piece_count - 2) / 4, 0, NET.n_ob - 1);
     const float* w = &NET.out_w[static_cast<size_t>(ob) * 2 * H];
     float s = 0.0f;
-    for (int i = 0; i < H; i++) {
-        int x = std::clamp<int>(us[i], 0, QA);
-        s += static_cast<float>(x * x) * w[i];
-    }
-    for (int i = 0; i < H; i++) {
-        int x = std::clamp<int>(them[i], 0, QA);
-        s += static_cast<float>(x * x) * w[H + i];
+#ifdef __AVX2__
+    if (H % 16 == 0) {
+        // SCReLU dot product, 16 neurons per step with 4 independent accumulators.
+        const __m256i lo = _mm256_setzero_si256(), hi = _mm256_set1_epi16(QA);
+        __m256 acc[4] = {_mm256_setzero_ps(), _mm256_setzero_ps(), _mm256_setzero_ps(), _mm256_setzero_ps()};
+        for (int side = 0; side < 2; side++) {
+            const std::int16_t* x = side == 0 ? us : them;
+            const float* ws = w + side * H;
+            for (int i = 0; i < H; i += 16) {
+                __m256i v = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(x + i));
+                v = _mm256_min_epi16(_mm256_max_epi16(v, lo), hi);
+                const __m256i a = _mm256_cvtepi16_epi32(_mm256_castsi256_si128(v));
+                const __m256i b = _mm256_cvtepi16_epi32(_mm256_extracti128_si256(v, 1));
+                const __m256 fa = _mm256_cvtepi32_ps(_mm256_mullo_epi32(a, a));
+                const __m256 fb = _mm256_cvtepi32_ps(_mm256_mullo_epi32(b, b));
+                const int k = (i >> 3) & 2;
+                acc[k] = _mm256_fmadd_ps(fa, _mm256_loadu_ps(ws + i), acc[k]);
+                acc[k + 1] = _mm256_fmadd_ps(fb, _mm256_loadu_ps(ws + i + 8), acc[k + 1]);
+            }
+        }
+        const __m256 t = _mm256_add_ps(_mm256_add_ps(acc[0], acc[1]), _mm256_add_ps(acc[2], acc[3]));
+        __m128 r = _mm_add_ps(_mm256_castps256_ps128(t), _mm256_extractf128_ps(t, 1));
+        r = _mm_add_ps(r, _mm_movehl_ps(r, r));
+        r = _mm_add_ss(r, _mm_shuffle_ps(r, r, 1));
+        s = _mm_cvtss_f32(r);
+    } else
+#endif
+    {
+        for (int i = 0; i < H; i++) {
+            int x = std::clamp<int>(us[i], 0, QA);
+            s += static_cast<float>(x * x) * w[i];
+        }
+        for (int i = 0; i < H; i++) {
+            int x = std::clamp<int>(them[i], 0, QA);
+            s += static_cast<float>(x * x) * w[H + i];
+        }
     }
     float out = s / static_cast<float>(QA * QA) + NET.out_b[ob];
     // Keep far away from the search's mate-score range.
@@ -194,8 +228,6 @@ struct Stack {
     void push(const chess::Board& board, const chess::Move& m) {
         Accumulator& next = acc[top + 1];
         const Accumulator& cur = acc[top];
-        std::memcpy(next.v[0], cur.v[0], NET.hidden * 2);
-        std::memcpy(next.v[1], cur.v[1], NET.hidden * 2);
         next.view[0] = cur.view[0];
         next.view[1] = cur.view[1];
         next.dirty[0] = next.dirty[1] = false;
@@ -214,27 +246,48 @@ struct Stack {
             if (!(view_for(us, king_to) == cur.view[us])) next.dirty[us] = true;
         }
 
+        // Pieces removed and placed by the move as {color, type, square}.
+        int subs[2][3], adds[2][3], ns = 0, na = 0;
+        auto sub = [&](int c, int t, int s) { subs[ns][0] = c; subs[ns][1] = t; subs[ns][2] = s; ns++; };
+        auto add = [&](int c, int t, int s) { adds[na][0] = c; adds[na][1] = t; adds[na][2] = s; na++; };
         if (m.typeOf() == chess::Move::CASTLING) {
             // chess.hpp encodes castling as "king takes own rook".
             const bool king_side = to > from;
             const int rank_base = from & 56;
-            const int king_to = rank_base + (king_side ? 6 : 2);
-            const int rook_to = rank_base + (king_side ? 5 : 3);
-            sub_piece(next, us, 5, from);
-            sub_piece(next, us, 3, to);
-            add_piece(next, us, 5, king_to);
-            add_piece(next, us, 3, rook_to);
-            return;
-        }
-        if (m.typeOf() == chess::Move::ENPASSANT) {
-            sub_piece(next, them, 0, to ^ 8);
+            sub(us, 5, from);
+            sub(us, 3, to);
+            add(us, 5, rank_base + (king_side ? 6 : 2));
+            add(us, 3, rank_base + (king_side ? 5 : 3));
         } else {
-            const auto captured = board.at<chess::PieceType>(m.to());
-            if (captured != chess::PieceType::NONE) sub_piece(next, them, static_cast<int>(captured), to);
+            if (m.typeOf() == chess::Move::ENPASSANT) {
+                sub(them, 0, to ^ 8);
+            } else {
+                const auto captured = board.at<chess::PieceType>(m.to());
+                if (captured != chess::PieceType::NONE) sub(them, static_cast<int>(captured), to);
+            }
+            sub(us, moved, from);
+            add(us, m.typeOf() == chess::Move::PROMOTION ? static_cast<int>(m.promotionType()) : moved, to);
         }
-        sub_piece(next, us, moved, from);
-        const int placed = m.typeOf() == chess::Move::PROMOTION ? static_cast<int>(m.promotionType()) : moved;
-        add_piece(next, us, placed, to);
+
+        // One pass per perspective: next = cur - removed rows + added rows.
+        const int H = NET.hidden;
+        for (int p = 0; p < 2; p++) {
+            if (next.dirty[p]) continue;
+            const std::int16_t* s0 = row(feature(p, next.view[p], subs[0][0], subs[0][1], subs[0][2]));
+            const std::int16_t* a0 = row(feature(p, next.view[p], adds[0][0], adds[0][1], adds[0][2]));
+            const std::int16_t* c = cur.v[p];
+            std::int16_t* n = next.v[p];
+            if (ns == 1) {
+                for (int i = 0; i < H; i++) n[i] = c[i] - s0[i] + a0[i];
+            } else if (na == 1) {
+                const std::int16_t* s1 = row(feature(p, next.view[p], subs[1][0], subs[1][1], subs[1][2]));
+                for (int i = 0; i < H; i++) n[i] = c[i] - s0[i] - s1[i] + a0[i];
+            } else {
+                const std::int16_t* s1 = row(feature(p, next.view[p], subs[1][0], subs[1][1], subs[1][2]));
+                const std::int16_t* a1 = row(feature(p, next.view[p], adds[1][0], adds[1][1], adds[1][2]));
+                for (int i = 0; i < H; i++) n[i] = c[i] - s0[i] - s1[i] + a0[i] + a1[i];
+            }
+        }
     }
 
     // Call after board.makeMove(): recomputes perspectives a king move invalidated.
