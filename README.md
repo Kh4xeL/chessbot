@@ -13,7 +13,7 @@ With 5 pieces or fewer, **Syzygy endgame tablebases** give the exact result and 
 |---|---|---|
 | Positions evaluated per second | ~700 | ~2.4M per thread, ~9.7M with 4 threads |
 | Depth in 1–2 s | 3–4 | 14–20 |
-| Strength vs Stockfish's Elo limiter (1 thread, 0.3 s/move) | not measured | ~3000 (−194 ± 44 vs SF 3190, the limiter's maximum; 150 games) |
+| Strength vs Stockfish's Elo limiter (1 thread, 0.3 s/move) | not measured | ~3000 (+5 ± 43 vs SF 3000, −194 ± 44 vs SF 3190, the limiter's maximum; 150 games each) |
 | Average centipawn loss, same 47 positions from a real game | 32 | 21 |
 | Human move prediction (top-1, Lichess games) | 39.2% (original CNN) | 48.9% (rating-aware CNN) |
 | Runtime dependencies | LibTorch (~2 GB) | none (plain C++17) |
