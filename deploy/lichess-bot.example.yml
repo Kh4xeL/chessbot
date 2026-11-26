@@ -1,0 +1,58 @@
+# Config for lichess-bot (https://github.com/lichess-bot-devs/lichess-bot) running this engine.
+# Copy it to config.yml in your lichess-bot folder and fill in the paths. See "Play online"
+# in the README for the account steps (a bot account needs a fresh Lichess account).
+#
+# The token: either paste it below or leave it out and set the LICHESS_BOT_TOKEN
+# environment variable. Never commit a real token.
+
+token: "xxxxxxxxxxxxxxxx"
+url: "https://lichess.org/"
+
+engine:
+  dir: "C:/path/to/chessbot/cmake-build-release/"    # folder with engine.exe
+  name: "engine.exe"
+  working_dir: "C:/path/to/chessbot/"                 # project root: the engine loads assets/ from here
+  protocol: "uci"
+  ponder: false
+  polyglot:
+    enabled: false                                    # the engine has its own opening knowledge
+  draw_or_resign:
+    resign_enabled: false
+    offer_draw_enabled: false
+  online_moves:
+    online_egtb:
+      enabled: false                                  # the engine probes local Syzygy tables itself
+  uci_options:
+    Threads: 4
+    Move Overhead: 100
+    SyzygyPath: "C:/path/to/chessbot/tools/syzygy"
+    # A weaker, human-like opponent instead of full strength (800-2800):
+    # UCI_LimitStrength: true
+    # UCI_Elo: 1600
+
+abort_time: 30
+fake_think_time: false
+move_overhead: 1000
+
+challenge:
+  concurrency: 1                                      # one game at a time (keeps the CPU cool)
+  sort_by: "best"
+  accept_bot: false
+  only_bot: false
+  max_increment: 30
+  min_increment: 0
+  max_base: 1800
+  min_base: 60
+  variants:
+    - standard
+  time_controls:
+    - blitz
+    - rapid
+    - classical
+  modes:
+    - casual
+    - rated
+
+greeting:
+  hello: "Hi! I'm a hybrid NNUE + rating-aware CNN engine. Good luck!"
+  goodbye: "Thanks for the game!"

@@ -39,12 +39,16 @@ def load_model(path=MODEL_PATH):
     return m
 
 
-def move_loss(engine, board, move, nodes=20000):
+def move_loss(engine, board, move, nodes=20000, out=None):
     """Expected-score loss of `move` for the side to move, from the engine's (UCI, fixed nodes)
-    evaluation before and after it. `board` is not changed."""
+    evaluation before and after it. `board` is not changed. If `out` is a dict, the engine's
+    principal variation before the move is stored in out["pv"]."""
     import chess.engine
     limit = chess.engine.Limit(nodes=nodes)
-    before = engine.analyse(board, limit)["score"].pov(board.turn).score(mate_score=10000)
+    info = engine.analyse(board, limit)
+    before = info["score"].pov(board.turn).score(mate_score=10000)
+    if out is not None:
+        out["pv"] = info.get("pv", [])
     b = board.copy(stack=False)
     b.push(move)
     if b.is_game_over():

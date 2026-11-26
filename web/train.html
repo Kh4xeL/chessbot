@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Training · AI Chess Tutor</title>
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <link rel="stylesheet" href="https://unpkg.com/@chrisoakman/chessboardjs@1.0.0/dist/chessboard-1.0.0.min.css">
+    <script src="https://unpkg.com/@chrisoakman/chessboardjs@1.0.0/dist/chessboard-1.0.0.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/chess.js/0.10.3/chess.min.js"></script>
+    <script src="/web/ui.js"></script>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #1e1e1e;
+               color: #fff; display: flex; flex-direction: column; align-items: center; margin: 24px 16px; }
+        a.back { color: #aaa; text-decoration: none; font-size: 14px; align-self: flex-start; max-width: 1100px; }
+        a.back:hover { color: #fff; }
+        .tabs { display: flex; gap: 6px; margin: 10px 0 18px 0; flex-wrap: wrap; justify-content: center; }
+        .tab { background: #2d2d2d; color: #ccc; border: 1px solid #444; border-radius: 6px; padding: 8px 16px;
+               cursor: pointer; font-size: 14px; }
+        .tab.active { background: #4CAF50; color: #fff; border-color: #4CAF50; }
+        .layout { display: flex; gap: 28px; align-items: flex-start; justify-content: center; flex-wrap: wrap; }
+        #board { width: 480px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); }
+        .panel { background: #2d2d2d; border-radius: 8px; padding: 16px; width: 360px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); }
+        .panel h3 { margin: 0 0 8px 0; color: #4CAF50; font-size: 16px; }
+        .muted { color: #999; font-size: 13px; }
+        .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 8px 0; }
+        .btn { background: #3a3a3a; color: #eee; border: 1px solid #555; border-radius: 5px; padding: 6px 12px;
+               font-size: 13px; cursor: pointer; }
+        .btn:hover { background: #4a4a4a; }
+        .btn.primary { background: #3665cd; border-color: #3665cd; }
+        select, input[type=number] { background: #333; color: #fff; border: 1px solid #555; border-radius: 4px; padding: 5px; }
+        .msg { margin-top: 10px; padding: 10px; border-radius: 6px; background: #222; font-size: 14px; line-height: 1.45; }
+        .msg.good { border-left: 4px solid #2ecc71; }
+        .msg.bad { border-left: 4px solid #e67e22; }
+        .msg.info { border-left: 4px solid #3665cd; }
+        table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 8px; }
+        th { text-align: left; color: #999; font-weight: normal; padding: 4px; border-bottom: 1px solid #444; }
+        td { padding: 5px 4px; border-bottom: 1px solid #333; }
+        tr.mv { cursor: pointer; }
+        tr.mv:hover { background: #383838; }
+        .bar { display: inline-block; height: 6px; background: #4CAF50; border-radius: 3px; vertical-align: middle; margin-right: 4px; }
+        .eval-badge { display: inline-block; min-width: 44px; text-align: center; font-weight: bold; font-size: 12px;
+                      padding: 2px 5px; border-radius: 4px; font-family: Consolas, monospace; }
+        .moves { font-size: 13px; color: #ccc; max-height: 120px; overflow-y: auto; background: #222; border-radius: 6px;
+                 padding: 6px; margin-top: 8px; }
+        .stat { font-size: 26px; font-weight: bold; }
+        @media (max-width: 900px) { #board { width: min(480px, 92vw); } .panel { width: min(360px, 92vw); } }
+    </style>
+</head>
+
+<body>
+    <a class="back" href="/">← Back to Start</a>
+    <h2 style="margin: 6px 0 0 0;">Training</h2>
+    <div class="tabs">
+        <button class="tab" data-tab="puzzles">🧩 Your puzzles</button>
+        <button class="tab" data-tab="endgames">♔ Endgames</button>
+        <button class="tab" data-tab="openings">📖 Openings</button>
+        <button class="tab" data-tab="guess">🎯 Guess the move</button>
+    </div>
+
+    <div class="layout">
+        <div>
+            <div id="board"></div>
+            <div id="status" class="muted" style="text-align: center; margin-top: 8px;"></div>
+        </div>
+
+        <!-- Puzzles -->
+        <div class="panel" id="panel-puzzles">
+            <h3>Puzzles from your mistakes</h3>
+            <div id="pzCounts" class="muted"></div>
+            <div id="pzBody"></div>
+        </div>
+
+        <!-- Endgames -->
+        <div class="panel" id="panel-endgames">
+            <h3>Endgame trainer</h3>
+            <div class="muted">Win against perfect tablebase defence. Par is what a perfect attacker needs.</div>
+            <div class="row">
+                <select id="egType"></select>
+                <select id="egColor"><option value="w">White</option><option value="b">Black</option><option value="r">Random</option></select>
+                <button class="btn primary" onclick="Endgames.start()">New position</button>
+            </div>
+            <div class="row" id="egInfo"></div>
+            <div id="egMsg"></div>
+            <div class="row"><button class="btn" onclick="Endgames.undo()">↶ Undo</button>
+                <button class="btn" onclick="Endgames.restart()">⟲ Restart</button></div>
+        </div>
+
+        <!-- Openings -->
+        <div class="panel" id="panel-openings">
+            <h3>Opening explorer</h3>
+            <div class="row">
+                <label class="muted">Your level <input type="number" id="opLevel" min="600" max="2800" step="100" value="1500" style="width: 70px;"></label>
+                <button class="btn" onclick="Openings.back()">◀ Back</button>
+                <button class="btn" onclick="Openings.reset()">⏮ Start</button>
+            </div>
+            <div id="opLine" class="moves"></div>
+            <div id="opTable"></div>
+        </div>
+
+        <!-- Guess the move -->
+        <div class="panel" id="panel-guess">
+            <h3>Guess the move</h3>
+            <div class="muted">Strong Lichess games (both players 2400+). Guess each move of one side.</div>
+            <div class="row">
+                <select id="gsSide"><option value="w">Guess White</option><option value="b">Guess Black</option></select>
+                <button class="btn primary" onclick="Guess.start()">New game</button>
+            </div>
+            <div id="gsInfo" class="muted"></div>
+            <div class="row" style="justify-content: space-around; text-align: center;">
+                <div><div class="stat" id="gsScore">0</div><div class="muted">points</div></div>
+                <div><div class="stat" id="gsCount">0</div><div class="muted">moves guessed</div></div>
+                <div><div class="stat" id="gsExact">0</div><div class="muted">exact</div></div>
+            </div>
+            <div id="gsMsg"></div>
+        </div>
+    </div>
+
+    <script>
+        var game = new Chess();
+        var board = null;
+        var mode = null;                 // the active trainer: Puzzles, Endgames, Openings or Guess
+        var busy = false;                // waiting for the server: ignore moves
+
+        function post(path, body) {
+            return fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+                .then(r => r.json().then(d => { if (!r.ok) throw new Error(d.detail || r.statusText); return d; }));
+        }
+        function pct(p) { return p >= 0.995 ? '100%' : (p >= 0.01 ? Math.round(p * 100) + '%' : (p > 0 ? '<1%' : '–')); }
+        function uci(m) { return m.from + m.to + (m.promotion || ''); }
+        function setStatus(t) { $('#status').html(t || ''); }
+        function orient(color) { board.orientation(color === 'w' ? 'white' : 'black'); }
+        function load(fen) { game.load(fen); board.position(fen, false); }
+
+        function onDragStart(source, piece) {
+            if (busy || game.game_over() || !mode || !mode.canMove()) return false;
+            if (piece[0] !== game.turn()) return false;
+        }
+        function onDrop(source, target) {
+            var m = game.move({ from: source, to: target, promotion: 'q' });
+            if (m === null) return 'snapback';
+            mode.onMove(m);
+        }
+        board = Chessboard('board', { draggable: true, position: 'start', onDragStart: onDragStart, onDrop: onDrop,
+            onSnapEnd: () => board.position(game.fen()),
+            pieceTheme: 'https://chessboardjs.com/img/chesspieces/wikipedia/{piece}.png' });
+
+        // ------------------------------------------------------------------ puzzles
+        var Puzzles = {
+            cur: null, answered: false,
+            open() { this.next(); },
+            canMove() { return this.cur && !this.answered; },
+            next() {
+                this.answered = false;
+                fetch('/puzzles/next').then(r => r.json()).then(d => {
+                    var c = d.counts;
+                    $('#pzCounts').text(`${c.due} due · ${c.total} collected · ${c.retired} learned for good`);
+                    this.cur = d.puzzle;
+                    if (!d.puzzle) {
+                        load('8/8/8/8/8/8/8/8 w - - 0 1');
+                        var when = c.next_due ? ' The next one is due ' + new Date(c.next_due * 1000).toLocaleString() + '.' : '';
+                        $('#pzBody').html(c.total
+                            ? `<div class="msg good">Nothing due right now.${when}</div>`
+                            : '<div class="msg info">No puzzles yet. Finish games in Play: each move that cost you a lot becomes a puzzle here.</div>');
+                        setStatus('');
+                        return;
+                    }
+                    var p = d.puzzle;
+                    load(p.fen);
+                    orient(game.turn());
+                    var side = game.turn() === 'w' ? 'White' : 'Black';
+                    $('#pzBody').html(`<div class="msg info">In one of your games you played <b>${p.played_san}</b> here as ${side}. ` +
+                        `Find a better move.</div><div class="muted" style="margin-top:6px;">Attempts so far: ${p.attempts} · box ${p.box + 1} of 5</div>`);
+                    setStatus(side + ' to move');
+                });
+            },
+            onMove(m) {
+                busy = true;
+                setStatus('Checking…');
+                post('/puzzles/answer', { id: this.cur.id, move: uci(m) }).then(d => {
+                    var v = d.verdict;
+                    this.answered = true;
+                    var due = v.retired ? 'Learned: it won’t come back.' : 'Next review: ' + new Date(v.due * 1000).toLocaleString() + '.';
+                    var html = v.solved
+                        ? `<div class="msg good">✅ ${m.san === v.best_san ? 'Exactly the engine’s move.' : 'Good: as strong as the engine’s ' + v.best_san + '.'}` +
+                          `<br><span class="muted">Line: ${v.line_san}</span><br><span class="muted">${due}</span></div>`
+                        : `<div class="msg bad">❌ ${m.san} gives up ${Math.round(v.loss * 100)}% of your winning chances against the best move, <b>${v.best_san}</b>.` +
+                          `<br><span class="muted">Line: ${v.line_san}</span><br><span class="muted">It comes back in 10 minutes.</span></div>`;
+                    $('#pzBody').append(html + '<div class="row"><button class="btn primary" onclick="Puzzles.next()">Next puzzle</button></div>');
+                    $('#pzCounts').text(`${d.counts.due} due · ${d.counts.total} collected · ${d.counts.retired} learned for good`);
+                    setStatus('');
+                }).catch(e => { game.undo(); board.position(game.fen()); setStatus(e.message); })
+                  .finally(() => busy = false);
+            }
+        };
+
+        // ------------------------------------------------------------------ endgames
+        var Endgames = {
+            pos: null, moves: [], over: false,
+            open() {
+                if (!$('#egType option').length) {
+                    fetch('/endgame/list').then(r => r.json()).then(d => {
+                        $('#egType').html(d.endings.map(e => `<option value="${e.id}">${e.title}</option>`).join(''));
+                        this.start();
+                    });
+                } else if (this.pos) { this.redraw(); } else { this.start(); }
+            },
+            canMove() { return this.pos && !this.over && game.turn() === this.color; },
+            start() {
+                busy = true;
+                $('#egMsg').html('<div class="msg info">Finding a position…</div>');
+                post('/endgame/new', { ending: $('#egType').val(), color: $('#egColor').val() }).then(p => {
+                    this.pos = p; this.color = p.fen.split(' ')[1]; this.restart();
+                }).catch(e => $('#egMsg').html(`<div class="msg bad">${e.message}</div>`)).finally(() => busy = false);
+            },
+            restart() {
+                if (!this.pos) return;
+                this.moves = []; this.over = false;
+                load(this.pos.fen); orient(this.color);
+                $('#egMsg').html(`<div class="msg info">${this.pos.title}: win as ${this.color === 'w' ? 'White' : 'Black'}.</div>`);
+                this.info();
+            },
+            redraw() {
+                load(this.pos.fen);
+                this.moves.forEach(u => game.move({ from: u.slice(0, 2), to: u.slice(2, 4), promotion: u[4] || 'q' }));
+                board.position(game.fen(), false); orient(this.color); this.info();
+            },
+            info(extra) {
+                var mine = Math.ceil(this.moves.length / 2);
+                $('#egInfo').html(`<span>Your moves: <b>${mine}</b></span><span class="muted">· par ${this.pos.par}</span>` + (extra || ''));
+            },
+            // Takes back the player's last move (and the defence's reply, when there was one).
+            undo() {
+                if (!this.pos || busy || !this.moves.length) return;
+                this.moves.splice(this.moves.length % 2 ? -1 : -2);
+                this.over = false; this.redraw();
+                $('#egMsg').html('<div class="msg info">Took back your last move.</div>');
+            },
+            onMove(m) {
+                this.moves.push(uci(m));
+                busy = true;
+                post('/endgame/move', { start_fen: this.pos.fen, moves: this.moves }).then(d => {
+                    var st = d.status;
+                    if (d.reply) {
+                        game.move({ from: d.reply.slice(0, 2), to: d.reply.slice(2, 4), promotion: d.reply[4] || 'q' });
+                        this.moves.push(d.reply);
+                        board.position(game.fen());
+                    }
+                    var mine = d.player_moves;
+                    if (st.state === 'mate') {
+                        this.over = true;
+                        var verdict = mine <= this.pos.par ? 'Perfect: as fast as the tablebase.' :
+                            `${mine - this.pos.par} more than par. Try again for a faster win.`;
+                        $('#egMsg').html(`<div class="msg good">✅ Checkmate in ${mine} moves (par ${this.pos.par}). ${verdict}</div>`);
+                    } else if (st.state === 'lost_win' || st.state === 'draw') {
+                        this.over = true;
+                        var why = st.state === 'draw' ? `the game is drawn (${st.reason})` : (st.wdl < 0 ? 'the position is now lost' : 'the position is now only a draw');
+                        $('#egMsg').html(`<div class="msg bad">❌ ${m.san} threw away the win: ${why}. Undo and try another move.</div>`);
+                    } else {
+                        $('#egMsg').html(`<div class="msg good">Still winning. The defence played ${d.reply_san}.` +
+                            `<br><span class="muted">Tablebase: ${st.dtz} plies to the next capture or pawn move with best play.</span></div>`);
+                    }
+                    this.info();
+                }).catch(e => { this.moves.pop(); game.undo(); board.position(game.fen()); $('#egMsg').html(`<div class="msg bad">${e.message}</div>`); })
+                  .finally(() => busy = false);
+            }
+        };
+
+        // ------------------------------------------------------------------ openings
+        var Openings = {
+            history: [], req: 0,
+            open() {
+                fetch('/rating_history').then(r => r.json()).then(d => {
+                    if (d.overall && !this.levelSet) { $('#opLevel').val(Math.round(d.overall.rating / 100) * 100); this.levelSet = true; }
+                    this.redraw();
+                }).catch(() => this.redraw());
+            },
+            canMove() { return true; },
+            reset() { this.history = []; this.redraw(); },
+            back() { this.history.pop(); this.redraw(); },
+            play(u) { this.history.push(u); this.redraw(); },
+            onMove(m) { this.history.push(uci(m)); this.refresh(); },
+            redraw() {
+                game.reset();
+                this.history.forEach(u => game.move({ from: u.slice(0, 2), to: u.slice(2, 4), promotion: u[4] || 'q' }));
+                board.position(game.fen()); orient('w'); this.refresh();
+            },
+            refresh() {
+                var hist = game.history();
+                $('#opLine').html(hist.length ? UI.sanLine(new Chess().fen(), hist, 99) : '<span class="muted">Start position. Drag a move or click one below.</span>');
+                var level = parseInt($('#opLevel').val()) || 1500, id = ++this.req;
+                $('#opTable').html('<div class="muted" style="margin-top:8px;">Analysing…</div>');
+                post('/explorer', { fen: game.fen(), level: level }).then(d => {
+                    if (id !== this.req) return;
+                    if (!d.moves.length) { $('#opTable').html('<div class="muted">Game over.</div>'); return; }
+                    var rows = d.moves.map(m => `<tr class="mv" onclick="Openings.play('${m.move}')">` +
+                        `<td><b>${m.san}</b>${m.best ? ' ⭐' : ''}</td>` +
+                        `<td><span class="bar" style="width:${Math.round(m.book * 50)}px"></span>${pct(m.book)}</td>` +
+                        `<td><span class="bar" style="width:${Math.round(m.level * 50)}px; background:#3665cd"></span>${pct(m.level)}</td>` +
+                        `<td>${UI.evalBadge(m.eval, m.mate)}</td></tr>`).join('');
+                    $('#opTable').html(`<table><tr><th>Move</th><th>Book</th><th>~${d.level} players</th><th>Engine</th></tr>${rows}</table>` +
+                        `<div class="muted" style="margin-top:6px;">${d.in_book ? '' : 'Out of book. '}⭐ = the engine's choice. Evals are from White's side.</div>`);
+                }).catch(e => $('#opTable').html(`<div class="msg bad">${e.message}</div>`));
+            }
+        };
+        $('#opLevel').on('change', () => Openings.refresh());
+
+        // ------------------------------------------------------------------ guess the move
+        var Guess = {
+            g: null, ply: 0, side: 'w', score: 0, count: 0, exact: 0,
+            open() { if (!this.g) this.start(); else { this.redraw(); } },
+            canMove() { return this.g && this.ply < this.g.moves.length && game.turn() === this.side; },
+            start() {
+                this.side = $('#gsSide').val();
+                this.score = this.count = this.exact = 0; this.stats();
+                fetch('/guess/game').then(r => r.json()).then(g => {
+                    this.g = g; this.ply = 0;
+                    load(g.start_fen); orient(this.side);
+                    $('#gsInfo').html(`${g.opening || 'Game'} · White ${g.white_elo} vs Black ${g.black_elo} · ${g.result}`);
+                    $('#gsMsg').html('<div class="msg info">Guess the moves of ' + (this.side === 'w' ? 'White' : 'Black') + '.</div>');
+                    this.advance();
+                });
+            },
+            redraw() {
+                load(this.g.start_fen);
+                this.g.moves.slice(0, this.ply).forEach(u => game.move({ from: u.slice(0, 2), to: u.slice(2, 4), promotion: u[4] || 'q' }));
+                board.position(game.fen(), false); orient(this.side);
+            },
+            stats() { $('#gsScore').text(this.score); $('#gsCount').text(this.count); $('#gsExact').text(this.exact); },
+            // Plays the opponent's moves until it is the guessing side's turn.
+            advance() {
+                var step = () => {
+                    if (this.ply >= this.g.moves.length) {
+                        setStatus(`Game over: ${this.g.result}. ${this.count ? Math.round(this.score / this.count * 10) : 0}% of the points.`);
+                        return;
+                    }
+                    if (game.turn() === this.side) { setStatus(`Move ${Math.floor(this.ply / 2) + 1}: your guess?`); return; }
+                    var u = this.g.moves[this.ply++];
+                    game.move({ from: u.slice(0, 2), to: u.slice(2, 4), promotion: u[4] || 'q' });
+                    board.position(game.fen());
+                    setTimeout(step, 350);
+                };
+                step();
+            },
+            onMove(m) {
+                busy = true;
+                setStatus('Scoring…');
+                post('/guess/score', { game_id: this.g.id, ply: this.ply, move: uci(m) }).then(r => {
+                    this.count++; this.score += r.points; if (r.match) this.exact++; this.stats();
+                    var shares = `${pct(r.share_guess)} of ${r.level} players would play ${r.guess_san}` +
+                        (r.match ? '.' : `; ${pct(r.share_actual)} would play ${r.actual_san}.`);
+                    var verdict = r.match ? `✅ ${r.actual_san}: the move played in the game. +10`
+                        : (r.points >= 8 ? `👍 ${r.guess_san} is as good as the game move ${r.actual_san}. +${r.points}`
+                        : `${r.points ? '🟡' : '❌'} The game went ${r.actual_san}; ${r.guess_san} gives up ${Math.round(r.diff * 100)}% of the winning chances. +${r.points}`);
+                    var best = r.best !== r.actual && r.best !== r.guess ? `<br><span class="muted">The engine prefers ${r.best_san}.</span>` : '';
+                    $('#gsMsg').html(`<div class="msg ${r.points >= 8 ? 'good' : 'bad'}">${verdict}<br><span class="muted">${shares}</span>${best}</div>`);
+                    // Replace the guess with the game move and go on.
+                    game.undo();
+                    var u = this.g.moves[this.ply++];
+                    game.move({ from: u.slice(0, 2), to: u.slice(2, 4), promotion: u[4] || 'q' });
+                    board.position(game.fen());
+                    setTimeout(() => this.advance(), 500);
+                }).catch(e => { game.undo(); board.position(game.fen()); setStatus(e.message); })
+                  .finally(() => busy = false);
+            }
+        };
+
+        // ------------------------------------------------------------------ tabs
+        var MODES = { puzzles: Puzzles, endgames: Endgames, openings: Openings, guess: Guess };
+        function openTab(name) {
+            if (!MODES[name]) name = 'puzzles';
+            $('.tab').removeClass('active'); $(`.tab[data-tab=${name}]`).addClass('active');
+            $('.panel').hide(); $('#panel-' + name).show();
+            setStatus('');
+            mode = MODES[name];
+            mode.open();
+            history.replaceState(null, '', '#' + name);
+        }
+        $('.tab').on('click', function () { openTab($(this).data('tab')); });
+        openTab(location.hash.slice(1));
+    </script>
+</body>
+
+</html>

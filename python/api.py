@@ -637,7 +637,7 @@ def explore_move(request: ExploreRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 # --- Rating estimate ("Evaluate your Elo") ---
-from . import adaptive, elo_estimate, insights, rating_store
+from . import adaptive, elo_estimate, endgames, explorer, guess, insights, puzzles, rating_store
 
 MIN_RATED_MOVES = 10       # fewer of the player's moves say too little about their rating
 COMBINE_GAMES = 10         # the overall estimate uses this many most recent games
@@ -654,18 +654,21 @@ def _elo_model():
 
 
 def _move_losses(start_fen, moves, plies):
-    """Expected-score loss of the moves at the given 1-based plies."""
+    """Expected-score loss of the moves at the given 1-based plies, and the engine's line
+    before each (for puzzles)."""
     wanted = set(plies)
     board = chess.Board(start_fen)
-    losses = {}
+    losses, pvs = {}, {}
     with _ANALYSIS_LOCK:
         eng = _analysis_engine()
         for i, u in enumerate(moves):
             mv = chess.Move.from_uci(u)
             if i + 1 in wanted:
-                losses[i + 1] = elo_estimate.move_loss(eng, board, mv)[0]
+                out = {}
+                losses[i + 1] = elo_estimate.move_loss(eng, board, mv, out=out)[0]
+                pvs[i + 1] = out.get("pv", [])
             board.push(mv)
-    return [losses[p] for p in plies]
+    return [losses[p] for p in plies], [pvs[p] for p in plies]
 
 
 def _analysis_engine():
@@ -730,12 +733,13 @@ def rate_game(request: RateGameRequest):
     est = None
     if out["rated"]:
         plies = [plies[i] for i in keep]
-        losses = _move_losses(start, request.moves, plies)
+        losses, pvs = _move_losses(start, request.moves, plies)
         llp, counts = elo_estimate.summary(logp[keep], losses)
         est = elo_estimate.estimate_from_summary(llp, counts, model)
         out["game"] = est
         if request.save:
             rating_store.add_game(request.side, start, request.moves, request.bot_elo, request.result, est, llp, counts)
+            out["puzzles_added"] = puzzles.add_from_game(start, request.moves, plies, losses, pvs)
     else:
         out["reason"] = f"Too short to rate: at least {MIN_RATED_MOVES} of your moves are needed."
 
@@ -803,3 +807,137 @@ def get_insights(request: InsightsRequest):
             known.append((k["move"], sign * float(ev)))
     with _ANALYSIS_LOCK:
         return insights.compute(board, level, probs, _analysis_engine(), known=known)
+
+
+# --- Training page (puzzles, endgames, openings, guess the move) ---
+TRAIN_PATH = os.path.join(PROJECT_ROOT, "web", "train.html")
+
+
+@app.get("/train")
+def serve_train():
+    return FileResponse(TRAIN_PATH)
+
+
+@app.get("/puzzles/next")
+def puzzles_next():
+    """The most overdue puzzle from the player's own mistakes (None when nothing is due)."""
+    return {"puzzle": puzzles.next_puzzle(), "counts": puzzles.counts()}
+
+
+class PuzzleAnswer(BaseModel):
+    id: int
+    move: str
+
+
+@app.post("/puzzles/answer")
+def puzzles_answer(request: PuzzleAnswer):
+    try:
+        with _ANALYSIS_LOCK:
+            verdict = puzzles.answer(request.id, request.move, _analysis_engine())
+    except KeyError:
+        raise HTTPException(status_code=404, detail="no such puzzle")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"verdict": verdict, "counts": puzzles.counts()}
+
+
+@app.get("/endgame/list")
+def endgame_list():
+    return {"endings": [{"id": k, "title": v[0]} for k, v in endgames.ENDINGS.items()]}
+
+
+class EndgameNew(BaseModel):
+    ending: str
+    color: str = "w"                  # the player's colour: "w", "b" or "r" (random)
+
+
+@app.post("/endgame/new")
+def endgame_new(request: EndgameNew):
+    import random
+    color = request.color if request.color in ("w", "b") else random.choice("wb")
+    try:
+        return endgames.new_position(request.ending, white_attacks=(color == "w"))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
+class EndgameMove(BaseModel):
+    start_fen: str
+    moves: List[str]                  # all moves so far, the player's latest last
+
+
+@app.post("/endgame/move")
+def endgame_move(request: EndgameMove):
+    """Checks the player's latest move against the tablebase and plays the defence."""
+    board = chess.Board(request.start_fen)
+    try:
+        for u in request.moves:
+            mv = chess.Move.from_uci(u)
+            if mv not in board.legal_moves:
+                raise ValueError(f"illegal move {u}")
+            board.push(mv)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    player_moves = (len(request.moves) + 1) // 2
+    st = endgames.status(board)
+    out = {"status": st, "player_moves": player_moves, "reply": None}
+    if st["state"] == "winning":
+        reply = endgames.defender_move(board)
+        out["reply"] = reply.uci()
+        out["reply_san"] = board.san(reply)
+        board.push(reply)
+        if board.is_game_over(claim_draw=True):
+            out["status"] = {"state": "draw", "reason": "repetition or 50-move rule"}
+    out["fen"] = board.fen()
+    return out
+
+
+class ExploreOpeningRequest(BaseModel):
+    fen: str = chess.STARTING_FEN
+    level: int = 1500
+
+
+@app.post("/explorer")
+def opening_explorer(request: ExploreOpeningRequest):
+    """Book moves, what players at the given level play, and the engine's verdict on each."""
+    level = max(600, min(2800, int(request.level)))
+    try:
+        board = chess.Board(request.fen)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    probs = []
+    if not board.is_game_over():
+        probs = insights.parse_humanprobs(ENGINE.command(f"humanprobs {level} {board.fen()}"))
+    with _ANALYSIS_LOCK:
+        return explorer.explore(board, level, probs, _analysis_engine())
+
+
+@app.get("/guess/game")
+def guess_game(index: Optional[int] = None):
+    """A strong game for Guess the move (random unless an index is given)."""
+    return guess.get_game(index)
+
+
+class GuessRequest(BaseModel):
+    game_id: int
+    ply: int                          # 0-based index of the move being guessed
+    move: str                         # the guess, UCI
+
+
+@app.post("/guess/score")
+def guess_score(request: GuessRequest):
+    gs = guess.games()
+    if not 0 <= request.game_id < len(gs):
+        raise HTTPException(status_code=404, detail="no such game")
+    board = gs[request.game_id].board()
+    moves = list(gs[request.game_id].mainline_moves())
+    for mv in moves[:max(0, min(request.ply, len(moves)))]:
+        board.push(mv)
+    probs = insights.parse_humanprobs(ENGINE.command(f"humanprobs {guess.POLICY_LEVEL} {board.fen()}"))
+    try:
+        with _ANALYSIS_LOCK:
+            return guess.score(request.game_id, request.ply, request.move, _analysis_engine(), probs)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))

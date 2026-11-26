@@ -228,3 +228,55 @@ def test_insights_use_the_tutor_lines(client):
     nxd5 = next(p for p in r["popular"] if p["move"] == "f6d5")
     assert nxd5["eval"] == -1.6 and nxd5["loss"] == 1.7
     assert any(i["type"] == "trap" and i["move"] == "f6d5" for i in r["insights"])
+
+
+def test_puzzles_from_mistakes(client, tmp_path, monkeypatch):
+    monkeypatch.setattr(api.rating_store, "DB_PATH", str(tmp_path / "tutor.db"))
+    assert client.get("/puzzles/next").json()["puzzle"] is None
+    moves = "e2e4 e7e5 g1f3 d7d6 f1c4 c8g4 b1c3 g7g6 f3e5 g4d1".split()
+    pv = [chess.Move.from_uci(u) for u in ("d6e5", "d1g4")]
+    assert api.puzzles.add_from_game(START, moves, [10, 8], [0.9, 0.01], [pv, pv]) == 1   # only the real mistake
+    p = client.get("/puzzles/next").json()["puzzle"]
+    assert p["fen"] == LEGAL_TRAP and p["played_san"] == "Bxd1"
+    wrong = post(client, "/puzzles/answer", id=p["id"], move="g4d1")["verdict"]
+    assert not wrong["solved"] and wrong["box"] == 0 and wrong["best_san"] == "dxe5"
+    right = post(client, "/puzzles/answer", id=p["id"], move="d6e5")
+    assert right["verdict"]["solved"] and right["verdict"]["box"] == 1 and right["counts"]["due"] == 0
+    assert client.post("/puzzles/answer", json={"id": p["id"], "move": "e1e2"}).status_code == 400
+
+
+def test_endgame_trainer(client):
+    pos = post(client, "/endgame/new", ending="KQvK", color="w")
+    board = chess.Board(pos["fen"])
+    assert board.turn == chess.WHITE and pos["par"] >= 1
+    # A tablebase-perfect move keeps the win and gets the longest defence as a reply.
+    mv = api.endgames.attacker_move(board)
+    r = post(client, "/endgame/move", start_fen=pos["fen"], moves=[mv.uci()])
+    assert r["status"]["state"] in ("winning", "mate") and r["player_moves"] == 1
+    # Giving the queen away throws the win away.
+    king = board.king(chess.BLACK)
+    hang = next(m for m in board.legal_moves if board.piece_type_at(m.from_square) == chess.QUEEN
+                and chess.square_distance(m.to_square, king) == 1
+                and not board.attackers(chess.WHITE, m.to_square) - chess.SquareSet([m.from_square]))
+    r = post(client, "/endgame/move", start_fen=pos["fen"], moves=[hang.uci()])
+    assert r["status"]["state"] == "lost_win" and r["reply"] is None
+
+
+def test_opening_explorer(client):
+    r = post(client, "/explorer", fen="rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2", level=1500)
+    first = r["moves"][0]
+    assert first["san"] == "Nf3" and first["book"] > 0.5 and first["level"] > 0.3 and first["eval"] is not None
+    assert any(m["best"] for m in r["moves"]) and r["in_book"]
+
+
+def test_guess_the_move(client):
+    g = client.get("/guess/game", params={"index": 0}).json()
+    assert min(g["white_elo"], g["black_elo"]) >= 2400 and len(g["moves"]) >= 40
+    exact = post(client, "/guess/score", game_id=0, ply=4, move=g["moves"][4])
+    assert exact["match"] and exact["points"] == 10
+    board = chess.Board(g["start_fen"])
+    for u in g["moves"][:4]:
+        board.push_uci(u)
+    other = next(m.uci() for m in board.legal_moves if m.uci() != g["moves"][4])
+    r = post(client, "/guess/score", game_id=0, ply=4, move=other)
+    assert not r["match"] and 0 <= r["points"] <= 8 and 0 <= r["share_guess"] <= 1

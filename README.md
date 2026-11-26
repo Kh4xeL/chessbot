@@ -128,6 +128,12 @@ The tutor compares what players at your rating usually play with the engine's ch
 
 Each popular move is checked by a short fixed-node search, and with full hints the insights reuse the tutor's own lines, so the two never disagree. With full hints you see all three; with threat warnings only, the trap warnings. Hints also scale with your level: 3-ply lines and only the good moves below 1200, 5 plies up to 1800, full 8-ply lines above.
 
+### Training (`web/train.html`, <http://127.0.0.1:8000/train>)
+* **Your puzzles** (`python/puzzles.py`): when a finished game is rated, each of your moves that gave up 15% or more of your winning chances becomes a puzzle: the position before it, "find a better move". Any move within 5% of the engine's best counts as solved. Solved puzzles come back after 1, 3, 7, 16 and 35 days, then retire; a miss comes back in 10 minutes.
+* **Endgames** (`python/endgames.py`): convert a won endgame against perfect tablebase defence. There are eight endings, from queen vs king to rook and pawn vs rook and bishop and knight vs king. Positions are random wins checked with Syzygy. The defence resists longest by DTZ, and "par" is what a tablebase-perfect attacker needs. A move that throws the win away is flagged at once, with Undo.
+* **Opening explorer** (`python/explorer.py`): for each candidate move, its share in the opening book, the share of players at your level who play it, and the engine's eval after it. Click a move to follow it.
+* **Guess the move** (`python/guess.py`): step through 150 strong Lichess games (both players 2400+, from the held-out month, without player names) and guess one side's moves. The game move scores 10; a move the engine rates as good scores 8; others score less the more they give up. Each answer shows how many 2400 players would play your move and the game's.
+
 ### Endgame tablebases (`src/tablebase.hpp`)
 * **What:** Syzygy 3–5 piece tables (WDL + DTZ, ~940 MB), probed through [Fathom](https://github.com/jdart1/Fathom) (MIT, in `include/fathom/`).
 * **In the search:** win/draw/loss probes after captures and pawn moves.
@@ -194,7 +200,7 @@ pip install -r requirements.txt
 uvicorn python.api:app
 ```
 
-Open <http://127.0.0.1:8000>.
+Open <http://127.0.0.1:8000> to play, or <http://127.0.0.1:8000/train> for the trainers.
 * The API finds the engine in `cmake-build-release/` or `build/`. It runs `ENGINE_PROCESSES` (default 3) engines with `ENGINE_THREADS` (default 4) threads each, so hints and threat checks don't wait behind the bot's move.
 * Stockfish, used only for post-game analysis, is found through `STOCKFISH_PATH`, your `PATH`, `tools/` or Homebrew.
 
@@ -203,6 +209,16 @@ Open <http://127.0.0.1:8000>.
 python scripts/download_syzygy.py        # 3-4-5 piece Syzygy tables into tools/syzygy
 ```
 The engine finds them in `tools/syzygy` (or `--syzygy DIR` / `$SYZYGY_PATH`). Without them it simply searches endgames normally.
+
+### Play online (lichess-bot, optional)
+The engine speaks UCI, so [lichess-bot](https://github.com/lichess-bot-devs/lichess-bot) can run it on Lichess:
+1. Create a **new** Lichess account for the bot. It must not have played any games, and upgrading it to a bot account is permanent.
+2. Create an API token for it with the `bot:play` scope, at <https://lichess.org/account/oauth/token>.
+3. Clone lichess-bot and install its requirements. Follow its wiki to upgrade the account to a bot account.
+4. Copy `deploy/lichess-bot.example.yml` to `config.yml` in the lichess-bot folder. Set the paths to this project, and put the token in the file or in `LICHESS_BOT_TOKEN`. Don't commit a real token.
+5. Run `python lichess-bot.py`.
+
+The example plays one game at a time at full strength. For a human-like opponent, set `UCI_LimitStrength: true` and `UCI_Elo` in its `uci_options`.
 
 ### 3. Use the engine directly (optional)
 The engine speaks **UCI**, so any chess GUI (CuteChess, Arena, Banksia) or match runner can use it. Start it with no arguments. It supports these options: `Threads`, `MultiPV`, `Move Overhead`, `SyzygyPath`, `UCI_LimitStrength` and `UCI_Elo`.
@@ -301,14 +317,16 @@ python training/match.py --opponent cmake-build-release/engine.exe --opp-cwd old
 src/            engine: main.cpp (search + protocol), nnue.hpp, policy_net.hpp, tablebase.hpp, tests.hpp
 include/        chess.hpp (move generation, by Disservin), fathom/ (Syzygy probing, MIT)
 python/         api.py (FastAPI bridge), semantic_analysis.py (post-game review),
-                elo_estimate.py + rating_store.py (rating estimate and history), adaptive.py, insights.py
-web/            index.html, tree.js / tree.css (analysis move tree)
+                elo_estimate.py + rating_store.py (rating estimate and history), adaptive.py, insights.py,
+                puzzles.py, endgames.py, explorer.py, guess.py (training)
+web/            index.html, train.html, ui.js, tree.js / tree.css (analysis move tree)
 training/       prepare_data.py, prepare_games.py, label_fens.py, train_nnue.py, train_policy.py,
                 export_policy.py, match.py, fetch_heldout.py, heldout_features.py, fit_elo_estimator.py
 scripts/        datagen.py (self-play), test_change.py (SPRT), spsa.py, calibrate_elo.py, simulate_adaptive.py,
-                download_syzygy.py, make_openings.py
+                download_syzygy.py, make_openings.py, make_guess_games.py
 assets/         nnue.bin, policy_elo.bin, policy_cnn.bin (+ test vectors), traced_alphazero.pt, book.bin,
-                elo_model.json
+                elo_model.json, guess_games.pgn
+deploy/         lichess-bot.example.yml
 tests/          API and UCI tests (pytest), openings.epd
 ```
 
