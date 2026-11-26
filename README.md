@@ -87,6 +87,53 @@ Full-strength Stockfish is still far ahead: even with 3 s per move against Stock
 * **No LibTorch:** BatchNorm is folded into the convolutions and the forward pass is plain C++ (about 3 ms). The original AlphaZero-style CNN (`policy_cnn.bin`) is still supported as a fallback.
 * **Self-test:** `engine --selftest` checks the C++ output against PyTorch (also part of `engine --test`).
 
+### Rating estimate (`python/elo_estimate.py`)
+* **What:** after each game, an estimate of the rating your moves resembled, for example "~1550 (1420–1690)". The play panel also shows an overall estimate from your last 10 games and a trend line. Games are stored in SQLite (`data/tutor.db`).
+* **How:** each of your moves gives two pieces of evidence over ratings 600–2800:
+  * how likely a player of each rating was to play it (the rating-aware CNN, via the engine's `humangame` command);
+  * how much it lost by the engine's evaluation, against how often players of each rating lose that much.
+
+  These are combined into a best-fitting rating and an 80% range.
+* **Checked on 5,172 held-out Lichess games** from a month the CNN never saw (September 2026), fitted on half and tested on the other half:
+
+  | | Median error | Mean error | Within ±150 | 80% range holds the true rating |
+  |---|---|---|---|---|
+  | One game | 194 | 255 | 41% | 87% |
+  | 5 games | 99 | 126 | 66% | 79% |
+
+  A single game is a small sample, and single-game estimates lean toward the middle (low ratings read high, high ratings low). Over several games the estimate is within about ±100 typically. The move choice carries most of the signal; the eval losses add a little. Lichess ratings come from timed games, so untimed games against the bot may read somewhat higher.
+
+### Adaptive opponent (`python/adaptive.py`)
+* **What:** the "Adaptive" box next to the Elo slider. The bot starts at your overall rating estimate (1200 without one) and adjusts so you win about half your games. The play panel shows "Adaptive opponent: playing at ~1600 for you".
+* **Between games:** each finished game, including a resignation, moves it toward a 50% score: ±150 for the first 5 games, ±70 after. In those first games it is also pulled a quarter of the way toward the game's rating estimate.
+* **Within a game:** up to +250 Elo while you are far ahead, and down to −150 while you are far behind, so a lost position eases off a little without becoming a gift.
+* **Range:** 600–2800. The engine's 600 setting picks moves more loosely than the slider's lowest (800), so it can ease off for beginners.
+* **Simulated** with the engine at a fixed setting standing in for the player, 40 games each from a start of 1200 (`scripts/simulate_adaptive.py`):
+
+  | Player | Bot settles at | Player's score after game 10 |
+  |---|---|---|
+  | 800 | ~900 (700–1190) | 50% |
+  | 1000 | ~1050 (840–1190) | 50% |
+  | 1400 | ~1460 | 50% |
+  | 1800 | ~1820 | 52% |
+  | 2200 | ~2210 | 48% |
+
+  Below about 1200 the engine's settings play alike (1-ply search), so the bot wanders further there before the score moves. With an 800 floor the 1000 player scored only 33%, which is why the floor is 600.
+
+### Insights at your level (`python/insights.py`)
+The tutor compares what players at your rating usually play with the engine's choice. Your level is your rating estimate (or the adaptive opponent's Elo, or 1500). Three kinds of insight:
+* **What your level plays**, in the form "Most ~1500 players play Nf3 here (41%). The engine prefers d4, about 0.8 pawns better."
+* **Hard to find:** the engine's move is played by under 10% of players at your level, and it is at least 0.7 pawns better than the popular choice. In the Two Knights line 4.Ng5 d5 5.exd5, only 2% of ~1200 players find 5...b5.
+* **Trap warnings:** a move at least 12% of your level plays that loses 1.2 pawns or more. In Légal's trap (5.Nxe5), 80% of ~1000 players take the queen with 5...Bxd1 and walk into mate.
+
+Each popular move is checked by a short fixed-node search, and with full hints the insights reuse the tutor's own lines, so the two never disagree. With full hints you see all three; with threat warnings only, the trap warnings. Hints also scale with your level: 3-ply lines and only the good moves below 1200, 5 plies up to 1800, full 8-ply lines above.
+
+### Training (`web/train.html`, <http://127.0.0.1:8000/train>)
+* **Your puzzles** (`python/puzzles.py`): when a finished game is rated, each of your moves that gave up 15% or more of your winning chances becomes a puzzle: the position before it, "find a better move". Any move within 5% of the engine's best counts as solved. Solved puzzles come back after 1, 3, 7, 16 and 35 days, then retire; a miss comes back in 10 minutes.
+* **Endgames** (`python/endgames.py`): convert a won endgame against perfect tablebase defence. There are eight endings, from queen vs king to rook and pawn vs rook and bishop and knight vs king. Positions are random wins checked with Syzygy. The defence resists longest by DTZ, and "par" is what a tablebase-perfect attacker needs. A move that throws the win away is flagged at once, with Undo.
+* **Opening explorer** (`python/explorer.py`): for each candidate move, its share in the opening book, the share of players at your level who play it, and the engine's eval after it. Click a move to follow it.
+* **Guess the move** (`python/guess.py`): step through 150 strong Lichess games (both players 2400+, from the held-out month, without player names) and guess one side's moves. The game move scores 10; a move the engine rates as good scores 8; others score less the more they give up. Each answer shows how many 2400 players would play your move and the game's.
+
 ### Endgame tablebases (`src/tablebase.hpp`)
 * **What:** Syzygy 3–5 piece tables (WDL + DTZ, ~940 MB), probed through [Fathom](https://github.com/jdart1/Fathom) (MIT, in `include/fathom/`).
 * **In the search:** win/draw/loss probes after captures and pawn moves.
@@ -153,7 +200,7 @@ pip install -r requirements.txt
 uvicorn python.api:app
 ```
 
-Open <http://127.0.0.1:8000>.
+Open <http://127.0.0.1:8000> to play, or <http://127.0.0.1:8000/train> for the trainers.
 * The API finds the engine in `cmake-build-release/` or `build/`. It runs `ENGINE_PROCESSES` (default 3) engines with `ENGINE_THREADS` (default 4) threads each, so hints and threat checks don't wait behind the bot's move.
 * Stockfish, used only for post-game analysis, is found through `STOCKFISH_PATH`, your `PATH`, `tools/` or Homebrew.
 
@@ -162,6 +209,16 @@ Open <http://127.0.0.1:8000>.
 python scripts/download_syzygy.py        # 3-4-5 piece Syzygy tables into tools/syzygy
 ```
 The engine finds them in `tools/syzygy` (or `--syzygy DIR` / `$SYZYGY_PATH`). Without them it simply searches endgames normally.
+
+### Play online (lichess-bot, optional)
+The engine speaks UCI, so [lichess-bot](https://github.com/lichess-bot-devs/lichess-bot) can run it on Lichess:
+1. Create a **new** Lichess account for the bot. It must not have played any games, and upgrading it to a bot account is permanent.
+2. Create an API token for it with the `bot:play` scope, at <https://lichess.org/account/oauth/token>.
+3. Clone lichess-bot and install its requirements. Follow its wiki to upgrade the account to a bot account.
+4. Copy `deploy/lichess-bot.example.yml` to `config.yml` in the lichess-bot folder. Set the paths to this project, and put the token in the file or in `LICHESS_BOT_TOKEN`. Don't commit a real token.
+5. Run `python lichess-bot.py`.
+
+The example plays one game at a time at full strength. For a human-like opponent, set `UCI_LimitStrength: true` and `UCI_Elo` in its `uci_options`.
 
 ### 3. Use the engine directly (optional)
 The engine speaks **UCI**, so any chess GUI (CuteChess, Arena, Banksia) or match runner can use it. Start it with no arguments. It supports these options: `Threads`, `MultiPV`, `Move Overhead`, `SyzygyPath`, `UCI_LimitStrength` and `UCI_Elo`.
@@ -175,6 +232,8 @@ engine --eval "<fen>" ...                     # static NNUE evaluation
 
 In server mode the commands are:
 * `go <elo> <depth> <ms> <fen> [moves m1 m2 ...]`
+* `humanprobs <elo> <fen> [moves ...]`: each legal move's probability for a player of that rating, most likely first
+* `humangame <elo,elo,...> <w|b|all> <fen> moves m1 m2 ...`: for each move of that side, the played move's probability and rank at each rating
 * `newgame`
 * `quit`
 
@@ -234,6 +293,13 @@ python training/prepare_games.py --games 10000000          # stream rated games 
 python training/train_policy.py --epochs 2                 # writes assets/policy_elo.bin (~30 min)
 ```
 
+**Rating estimate**
+```bash
+python training/fetch_heldout.py                           # held-out rated games -> data/heldout_2026-09.pgn (~20 MB stream)
+python training/heldout_features.py                        # per-move policy (GPU) and eval-loss features (~25 min, 6 processes)
+python training/fit_elo_estimator.py                       # writes assets/elo_model.json and prints the held-out accuracy
+```
+
 **Measuring strength**
 ```bash
 python training/match.py --elo 2400 --games 40             # vs Stockfish's Elo limiter
@@ -250,13 +316,17 @@ python training/match.py --opponent cmake-build-release/engine.exe --opp-cwd old
 ```
 src/            engine: main.cpp (search + protocol), nnue.hpp, policy_net.hpp, tablebase.hpp, tests.hpp
 include/        chess.hpp (move generation, by Disservin), fathom/ (Syzygy probing, MIT)
-python/         api.py (FastAPI bridge), semantic_analysis.py (post-game review)
-web/            index.html, tree.js / tree.css (analysis move tree)
+python/         api.py (FastAPI bridge), semantic_analysis.py (post-game review),
+                elo_estimate.py + rating_store.py (rating estimate and history), adaptive.py, insights.py,
+                puzzles.py, endgames.py, explorer.py, guess.py (training)
+web/            index.html, train.html, ui.js, tree.js / tree.css (analysis move tree)
 training/       prepare_data.py, prepare_games.py, label_fens.py, train_nnue.py, train_policy.py,
-                export_policy.py, match.py
-scripts/        datagen.py (self-play), test_change.py (SPRT), spsa.py, calibrate_elo.py,
-                download_syzygy.py, make_openings.py
-assets/         nnue.bin, policy_elo.bin, policy_cnn.bin (+ test vectors), traced_alphazero.pt, book.bin
+                export_policy.py, match.py, fetch_heldout.py, heldout_features.py, fit_elo_estimator.py
+scripts/        datagen.py (self-play), test_change.py (SPRT), spsa.py, calibrate_elo.py, simulate_adaptive.py,
+                download_syzygy.py, make_openings.py, make_guess_games.py
+assets/         nnue.bin, policy_elo.bin, policy_cnn.bin (+ test vectors), traced_alphazero.pt, book.bin,
+                elo_model.json, guess_games.pgn
+deploy/         lichess-bot.example.yml
 tests/          API and UCI tests (pytest), openings.epd
 ```
 

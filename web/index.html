@@ -269,6 +269,14 @@
         .stat-row { display: flex; justify-content: space-between; font-size: 13px; color: #ccc; margin: 3px 0; }
         .captured { font-size: 18px; letter-spacing: -2px; color: #bbb; min-height: 22px; }
         .muted-line { opacity: 0.45; }
+        .rating-box { background: #222; border-radius: 6px; padding: 8px 10px; font-size: 13px; color: #ccc; }
+        .rating-main { font-size: 22px; font-weight: bold; color: #fff; }
+        .rating-range { color: #999; font-size: 12px; margin-left: 6px; }
+        .rating-note { color: #888; font-size: 12px; margin-top: 3px; }
+        .rating-trend { width: 100%; height: 48px; margin-top: 6px; }
+        .insights { margin-top: 10px; padding-top: 8px; border-top: 1px solid #444; text-align: left; }
+        .insights-title { font-size: 12px; font-weight: bold; color: #4CAF50; text-transform: uppercase; margin-bottom: 4px; }
+        .insight { font-size: 13px; margin: 4px 0; line-height: 1.35; }
     </style>
 </head>
 
@@ -281,6 +289,10 @@
         <div class="start-card" onclick="showPlayPage()">
             <h3>♟️ Play vs Engine</h3>
             <p>Challenge the Hybrid AlphaZero engine with real-time tutor assistance.</p>
+        </div>
+        <div class="start-card" onclick="location.href = '/train'">
+            <h3>🎯 Training</h3>
+            <p>Puzzles from your own mistakes, endgames against the tablebase, an opening explorer and guess the move.</p>
         </div>
         <div class="start-card" onclick="showImportPage()">
             <h3>📁 Import Game</h3>
@@ -314,6 +326,8 @@
                         oninput="document.getElementById('eloDisplay').innerText = this.value >= 2900 ? 'Max' : this.value">
                     <span id="eloDisplay" style="color: #4CAF50;">2500</span>
                 </label>
+                <label title="The bot starts near your estimated rating and adjusts so you win about half your games">
+                    <input type="checkbox" id="adaptiveMode" onchange="onAdaptiveToggle()"> Adaptive</label>
                 <label>Tutor Assistance:
                     <select id="assistLevel">
                         <option value="0">Level 0: No Help</option>
@@ -351,6 +365,7 @@
             <div class="btn-row" id="playToolbar">
                 <button class="tool-btn" onclick="startNewGame()" title="Start a new game with the chosen colour">♻️ New game</button>
                 <button class="tool-btn" onclick="undoMove()" title="Take back your last move">↶ Undo</button>
+                <button class="tool-btn" onclick="resignGame()" title="Resign this game (it counts as a loss)">🏳️ Resign</button>
                 <button class="tool-btn" onclick="flipBoard()" title="Flip the board">🔄 Flip</button>
                 <button class="tool-btn" onclick="UI.copy(playPgn(), this)">📋 Copy PGN</button>
                 <button class="tool-btn" onclick="UI.download('game.pgn', playPgn())">💾 Download PGN</button>
@@ -379,12 +394,19 @@
 
         <div id="playPanel" class="side-panel" style="display: none;">
             <div class="panel-title">Game</div>
+            <div id="adaptiveInfo" class="rating-note" style="display: none; margin: -4px 0 6px 0; color: #ccc;"></div>
             <div class="stat-row"><span id="capturedByWhite" class="captured"></span><span id="materialBalance" style="font-weight:bold;"></span></div>
             <div class="stat-row"><span id="capturedByBlack" class="captured"></span></div>
             <div class="panel-title" style="margin-top: 10px;">Evaluation</div>
             <div id="playGraph" class="graph-box"></div>
             <div class="panel-title">Moves</div>
             <div id="moveList" class="move-list"></div>
+            <div class="panel-title" style="margin-top: 12px;">
+                <span>Your rating</span>
+                <button class="tool-btn" id="rateBtn" onclick="rateGame(false)" style="padding: 2px 8px; font-size: 12px;"
+                        title="Estimate the rating your moves in this game resemble (not saved until the game ends)">Rate so far</button>
+            </div>
+            <div id="ratingBox" class="rating-box"><div class="rating-note">Finish a game to get an estimate.</div></div>
         </div>
 
         <div id="analysisView"
@@ -436,6 +458,10 @@
         var appMode = 'PLAY';
         var playerColor = 'w';            // the human's colour in play mode
         var playEvals = [];               // per ply: {evalPawns, mate} after that ply (engine's view)
+        var gameRated = false;            // this game's rating estimate has been saved
+        var resigned = false;             // the player resigned this game
+        var adaptiveState = null;         // {elo, games} from the server: the adaptive opponent's base Elo
+        var adaptiveGame = false;         // this game is against the adaptive opponent (fixed at its start)
         var lastEngineInfo = '';
         var analysisSummary = null;       // summary block of the last /analyze call
         var engineReq = 0;                // token to drop stale /analyze_position replies
@@ -468,7 +494,7 @@
         }
 
         function onDragStart(source, piece, position, orientation) {
-            if (game.game_over()) return false;
+            if (game.game_over() || (appMode === 'PLAY' && resigned)) return false;
             if (appMode === 'PLAY' && (game.turn() !== playerColor || piece[0] !== playerColor)) return false;
         }
 
@@ -499,9 +525,15 @@
             if (game.in_checkmate()) {
                 statusHTML = 'Game over, ' + moveColor + ' is in checkmate.';
                 $('#analyzeBtn').show();
+                if (appMode === 'PLAY' && !gameRated) rateGame(true);
             }
             else if (game.in_draw()) {
                 statusHTML = 'Game over, drawn position';
+                $('#analyzeBtn').show();
+                if (appMode === 'PLAY' && !gameRated) rateGame(true);
+            }
+            else if (appMode === 'PLAY' && resigned) {
+                statusHTML = 'Game over, you resigned.';
                 $('#analyzeBtn').show();
             }
             else {
@@ -514,6 +546,7 @@
         function getThreatDetection() {
             if (game.game_over() || game.turn() !== playerColor) return;
             var currentElo = parseInt(document.getElementById('eloInput').value) || 2500;
+            var fenAtRequest = game.fen();
             $tutorPanel.removeClass('threat-alert').html('<span style="color:#888;">Scanning for immediate threats...</span>').show();
 
             fetch('/get_threats', {
@@ -549,6 +582,7 @@
                             drawArrow(data.hint.substring(0,2), data.hint.substring(2,4), '#2ecc71', 0.8);
                         }
                     }
+                    appendInsights(['trap'], fenAtRequest);   // medium help: warnings only
                 })
                 .catch(err => console.error("Threat fetch error:", err));
         }
@@ -583,11 +617,13 @@
                     var best = lines.length ? forMe(lines[0]) : null;
                     var colors = ['#2ecc71', '#f1c40f', '#e67e22'];
                     var good = 0, arrows = [];
+                    var plies = hintPlies(), lowLevel = playerLevel() < 1400;
                     lines.forEach((tutor, idx) => {
                         var v = forMe(tutor);
                         var weak = idx > 0 && best !== null && v !== null && best - v > WEAK_LINE_PAWNS;
+                        if (weak && lowLevel) return;   // lower levels: only the moves worth playing
                         var san = UI.uciToSan(game.fen(), (tutor.idea || tutor.move).split(' ').filter(Boolean));
-                        var lineText = san.length ? UI.sanLine(game.fen(), san, 8) : (tutor.idea || 'None');
+                        var lineText = san.length ? UI.sanLine(game.fen(), san, plies) : (tutor.idea || 'None');
                         var badge = showEvals && (tutor.eval_pawns !== null || tutor.mate !== null) ? UI.evalBadge(tutor.eval_pawns, tutor.mate) : '';
                         $tutorPanel.append(`
                             <div class="tutor-line ${weak ? 'muted-line' : ''}" style="margin-bottom: 8px;">
@@ -606,8 +642,43 @@
                     arrows.reverse().forEach(a => drawArrow(a[0].substring(0,2), a[0].substring(2,4), a[1], a[2]));
                     if (lines.length === 1) $tutorPanel.append('<div style="font-size: 12px; color: #aaa;">This is your only legal move.</div>');
                     else if (lines.length > 1 && good === 1) $tutorPanel.append('<div style="font-size: 12px; color: #f1c40f;">⚠️ Only one good move here; the others lose a lot.</div>');
+                    appendInsights(['level_choice', 'hard_to_find', 'trap'], fenAtRequest,
+                        lines.map(t => ({ move: t.move, eval_pawns: t.eval_pawns, mate: t.mate })));
                 })
                 .catch(err => console.error("Tutor fetch error:", err));
+        }
+
+        // ---------------------------------------------------------------- insights by level
+        // The player's level: their overall rating estimate, else the adaptive opponent's Elo, else 1500.
+        function playerLevel() {
+            if (lastRatingData && lastRatingData.overall) return Math.round(lastRatingData.overall.rating / 50) * 50;
+            if (adaptiveState && adaptiveState.games > 0) return adaptiveState.elo;
+            return 1500;
+        }
+
+        // Plies of each hint line to show: short and concrete for lower levels, full lines higher up.
+        function hintPlies() { var l = playerLevel(); return l < 1200 ? 3 : (l < 1800 ? 5 : 8); }
+
+        // Appends what players at the player's level do here (only the given insight types).
+        // known: the tutor's lines already shown, so the insights use the same best move and evals.
+        function appendInsights(types, fenAtRequest, known) {
+            var level = playerLevel();
+            fetch('/insights', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(Object.assign({ fen: game.fen(), level: level, known: known || [] }, historyPayload()))
+            })
+                .then(r => r.json())
+                .then(d => {
+                    if (game.fen() !== fenAtRequest || !d.insights) return;
+                    var items = d.insights.filter(i => types.indexOf(i.type) >= 0);
+                    if (!items.length) return;
+                    var icon = { level_choice: '👥', hard_to_find: '💎', trap: '⚠️' };
+                    var color = { level_choice: '#ccc', hard_to_find: '#7fd1ff', trap: '#ffb38a' };
+                    var html = `<div class="insights"><div class="insights-title">At your level (~${d.level})</div>` +
+                        items.map(i => `<div class="insight" style="color:${color[i.type]};">${icon[i.type]} ${i.text}</div>`).join('') + '</div>';
+                    $tutorPanel.append(html).show();
+                })
+                .catch(err => console.error('insights failed', err));
         }
 
         function triggerAssistance() {
@@ -620,12 +691,12 @@
         $('#assistLevel').on('change', triggerAssistance);
 
         function makeEngineMove() {
-            if (game.game_over() || appMode !== 'PLAY' || game.turn() === playerColor) return;
+            if (game.game_over() || resigned || appMode !== 'PLAY' || game.turn() === playerColor) return;
             $move.hide();
             $thinking.show();
             var fenAtRequest = game.fen();
             var customDepth = parseInt(document.getElementById('depthInput').value) || 30;
-            var currentElo = parseInt(document.getElementById('eloInput').value) || 2500;
+            var currentElo = adaptiveGame ? adaptiveEloNow() : (parseInt(document.getElementById('eloInput').value) || 2500);
             fetch('/get_move', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -650,6 +721,7 @@
                         : `Engine: depth ${data.depth_reached} · ${data.time}s · eval ${UI.fmtEval(data.eval_pawns, data.mate)}`;
                     $('#engineInfo').text(lastEngineInfo);
                     refreshPlayPanel();
+                    if (adaptiveGame) renderAdaptiveInfo();
                     triggerAssistance();
                 })
                 .catch(err => { $thinking.hide(); console.error("API Error:", err); });
@@ -814,6 +886,133 @@
             $('.controls, .status-box, #playToolbar, #playPanel').show();
             $('#analysisToolbar').hide();
             startNewGame();
+            fetch('/rating_history').then(r => r.json()).then(d => {
+                renderRating(null, d);
+                adaptiveState = d.adaptive;
+                renderAdaptiveInfo();
+            }).catch(() => {});
+        }
+
+        // ---------------------------------------------------------------- adaptive opponent
+        function onAdaptiveToggle() {
+            var on = $('#adaptiveMode').is(':checked');
+            $('#eloInput').prop('disabled', on);
+            $('#eloDisplay').text(on ? 'Adaptive' : ($('#eloInput').val() >= 2900 ? 'Max' : $('#eloInput').val()));
+            // Takes effect from the next game, unless no move has been played yet.
+            if (game.history().length === 0 || (game.history().length === 1 && playerColor === 'b')) adaptiveGame = on;
+            renderAdaptiveInfo();
+        }
+
+        // The player's eval in pawns from the latest engine eval (mates count as +-10).
+        function playerEvalNow() {
+            var last = playEvals.filter(Boolean).slice(-1)[0];
+            if (!last) return null;
+            var e = (last.mate !== null && last.mate !== undefined) ? (last.mate > 0 ? 10 : -10) : last.evalPawns;
+            return playerColor === 'w' ? e : -e;
+        }
+
+        // Mirrors python/adaptive.py in_game_adjust: stronger when the player is far ahead,
+        // a little weaker when far behind.
+        function adaptiveAdjust() {
+            var e = playerEvalNow();
+            if (e === null) return 0;
+            if (e > 1.5) return Math.round(Math.min(250, (e - 1.5) * 100));
+            if (e < -1.5) return -Math.round(Math.min(150, (-e - 1.5) * 60));
+            return 0;
+        }
+
+        function adaptiveEloNow() {
+            var base = (adaptiveState && adaptiveState.elo) || 1200;
+            return Math.max(600, Math.min(2800, base + adaptiveAdjust()));
+        }
+
+        function renderAdaptiveInfo(change) {
+            if (!adaptiveGame && !$('#adaptiveMode').is(':checked')) { $('#adaptiveInfo').hide(); return; }
+            var base = (adaptiveState && adaptiveState.elo) || 1200;
+            var txt = `Adaptive opponent: playing at ~${base} for you`;
+            var adj = adaptiveGame ? adaptiveAdjust() : 0;
+            if (adj > 0) txt += ` (+${adj} while you're ahead)`;
+            if (adj < 0) txt += ` (${adj} while you're behind)`;
+            if (change && change.from !== change.to) txt += `<br>After this game: ${change.from} → ${change.to}`;
+            if (!adaptiveGame) txt += ' <span style="color:#888;">(from the next game)</span>';
+            $('#adaptiveInfo').html(txt).show();
+        }
+
+        function resignGame() {
+            if (appMode !== 'PLAY' || resigned || game.game_over() || game.history().length === 0) return;
+            if (!confirm('Resign this game?')) return;
+            resigned = true;
+            $thinking.hide();
+            $('#arrowLayer').empty();
+            $tutorPanel.hide();
+            updateStatus();
+            if (!gameRated) rateGame(true);
+        }
+
+        // ---------------------------------------------------------------- rating estimate
+        // save=true at the end of a game (stored, joins the overall estimate); false = preview only.
+        function rateGame(save) {
+            var payload = historyPayload();
+            var mine = game.history().filter((_, i) => ((i % 2 === 0) === (payload.start_fen.split(' ')[1] === playerColor))).length;
+            if (mine < 10 && !save) {
+                $('#ratingBox .rating-game').remove();
+                $('#ratingBox').prepend('<div class="rating-note rating-game">Play at least 10 moves to get an estimate.</div>');
+                return;
+            }
+            if (save) gameRated = true;   // a short finished game still counts for the adaptive opponent
+            $('#rateBtn').prop('disabled', true).text('Rating…');
+            fetch('/rate_game', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(Object.assign(payload, { side: playerColor, save: save, result: currentResult(),
+                    adaptive: adaptiveGame,
+                    bot_elo: adaptiveGame ? (adaptiveState && adaptiveState.elo) : (parseInt(document.getElementById('eloInput').value) || null) }))
+            })
+                .then(r => r.json())
+                .then(d => {
+                    renderRating(d.rated ? d.game : null, d, save);
+                    if (d.adaptive) { adaptiveState = d.adaptive; renderAdaptiveInfo(d.adaptive_change); }
+                })
+                .catch(err => console.error('rate_game failed', err))
+                .finally(() => $('#rateBtn').prop('disabled', false).text('Rate so far'));
+        }
+
+        var lastRatingData = null;        // last overall/history from the server, kept across games
+
+        function renderRating(gameEst, data, saved) {
+            if (data && data.history) lastRatingData = { overall: data.overall, history: data.history };
+            var html = '';
+            if (gameEst) {
+                html += `<div class="rating-game"><span class="rating-main">~${gameEst.rating}</span>` +
+                    `<span class="rating-range">${gameEst.low}–${gameEst.high}</span>` +
+                    `<div class="rating-note">${saved ? 'This game' : 'This game so far'}: your ${gameEst.moves} moves resembled a ~${gameEst.rating} player.</div></div>`;
+            } else if (data && data.rated === false && data.reason) {
+                html += `<div class="rating-note rating-game">${data.reason}</div>`;
+            }
+            var o = data && data.overall;
+            if (o) {
+                html += `<div style="margin-top: ${gameEst ? 8 : 0}px;"><b>Overall:</b> ~${o.rating} ` +
+                    `<span class="rating-range">${o.low}–${o.high} · last ${o.games} game${o.games > 1 ? 's' : ''}</span></div>`;
+            }
+            var h = (data && data.history) || [];
+            if (h.length >= 2) html += ratingTrend(h);
+            if (!html) html = '<div class="rating-note">Finish a game to get an estimate.</div>';
+            $('#ratingBox').html(html);
+        }
+
+        // Per-game estimates (oldest first) as a small line with each game's 80% range shaded.
+        function ratingTrend(h) {
+            var W = 300, H = 48, pad = 4;
+            var lo = Math.min(...h.map(g => g.low)), hi = Math.max(...h.map(g => g.high));
+            if (hi - lo < 200) { lo -= 100; hi += 100; }
+            var x = i => pad + i * (W - 2 * pad) / (h.length - 1);
+            var y = v => H - pad - (v - lo) * (H - 2 * pad) / (hi - lo);
+            var band = h.map((g, i) => `${x(i)},${y(g.high)}`).join(' ') + ' ' +
+                h.slice().reverse().map((g, i) => `${x(h.length - 1 - i)},${y(g.low)}`).join(' ');
+            var line = h.map((g, i) => `${x(i)},${y(g.rating)}`).join(' ');
+            var dots = h.map((g, i) => `<circle cx="${x(i)}" cy="${y(g.rating)}" r="2.5" fill="#4CAF50"><title>${new Date(g.ts * 1000).toLocaleDateString()}: ~${g.rating} (${g.low}–${g.high})</title></circle>`).join('');
+            return `<svg class="rating-trend" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">` +
+                `<polygon points="${band}" fill="#4CAF50" opacity="0.15"/>` +
+                `<polyline points="${line}" fill="none" stroke="#4CAF50" stroke-width="1.5"/>${dots}</svg>`;
         }
 
         // ---------------------------------------------------------------- play mode helpers
@@ -827,6 +1026,11 @@
             syncEvalBar();
             board.start();
             playEvals = [];
+            gameRated = false;
+            resigned = false;
+            adaptiveGame = $('#adaptiveMode').is(':checked');
+            renderAdaptiveInfo();
+            renderRating(null, lastRatingData);   // drop the previous game's line, keep the overall
             lastEngineInfo = '';
             $('#engineInfo').text('');
             $('#arrowLayer').empty();
@@ -839,7 +1043,7 @@
         }
 
         function undoMove() {
-            if (appMode !== 'PLAY') return;
+            if (appMode !== 'PLAY' || resigned) return;
             // Take back to the last position where it is the player's turn (usually 2 plies).
             var undone = 0;
             do {
@@ -904,8 +1108,16 @@
             UI.renderEvalGraph('#playGraph', pts, pts.length - 1, null, 0);
         }
 
+        // The game's result in PGN form, or null while it is still going.
+        function currentResult() {
+            if (game.in_checkmate()) return game.turn() === 'w' ? '0-1' : '1-0';
+            if (game.in_draw()) return '1/2-1/2';
+            if (resigned) return playerColor === 'w' ? '0-1' : '1-0';
+            return null;
+        }
+
         function playPgn() {
-            var result = game.in_checkmate() ? (game.turn() === 'w' ? '0-1' : '1-0') : (game.in_draw() ? '1/2-1/2' : '*');
+            var result = currentResult() || '*';
             var elo = $('#eloDisplay').text();
             var you = 'You', bot = 'Hybrid NNUE (' + elo + ')';
             var start = historyPayload().start_fen;
