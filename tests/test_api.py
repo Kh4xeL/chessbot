@@ -141,3 +141,32 @@ def test_tablebase_result_reported(client):
     assert drawn["tablebase"] == 0
     middlegame = post(client, "/get_move", fen=MIDDLEGAME, elo=3000, time_limit=200)
     assert middlegame["tablebase"] is None
+
+
+# A short game: 1.e4 e5 2.Nf3 Nc6 3.Bc4 Nf6 4.Ng5 d5 5.exd5 Na5 6.Bb5+ c6 7.dxc6 bxc6
+# 8.Be2 h6 9.Nf3 e4 10.Ne5 Bd6 11.d4 exd3 12.Nxd3 Qc7
+RATED_GAME = ("e2e4 e7e5 g1f3 b8c6 f1c4 g8f6 f3g5 d7d5 e4d5 c6a5 c4b5 c7c6 d5c6 b7c6 b5e2 h7h6 g5f3 e5e4 "
+              "f3e5 f8d6 d2d4 e4d3 e5d3 d8c7").split()
+
+
+def test_rate_game(client, tmp_path, monkeypatch):
+    monkeypatch.setattr(api.rating_store, "DB_PATH", str(tmp_path / "tutor.db"))
+    r = post(client, "/rate_game", moves=RATED_GAME, side="w", save=True, bot_elo=1500)
+    assert r["rated"], r
+    g = r["game"]
+    assert 600 <= g["low"] <= g["rating"] <= g["high"] <= 2800
+    assert g["moves"] >= 10
+    assert r["overall"]["games"] == 1 and len(r["history"]) == 1
+    # A preview isn't stored; a second saved game joins the overall estimate.
+    post(client, "/rate_game", moves=RATED_GAME, side="b", save=False)
+    assert client.get("/rating_history").json()["overall"]["games"] == 1
+    r2 = post(client, "/rate_game", moves=RATED_GAME, side="b", save=True)
+    assert r2["overall"]["games"] == 2 and len(r2["history"]) == 2
+
+
+def test_rate_game_rejects_short_and_illegal(client, tmp_path, monkeypatch):
+    monkeypatch.setattr(api.rating_store, "DB_PATH", str(tmp_path / "tutor.db"))
+    r = post(client, "/rate_game", moves=RATED_GAME[:6], side="w")
+    assert not r["rated"] and "at least" in r["reason"]
+    bad = client.post("/rate_game", json={"moves": ["e2e4", "e2e4"], "side": "w"})
+    assert bad.status_code == 400

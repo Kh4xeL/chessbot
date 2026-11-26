@@ -87,6 +87,22 @@ Full-strength Stockfish is still far ahead: even with 3 s per move against Stock
 * **No LibTorch:** BatchNorm is folded into the convolutions and the forward pass is plain C++ (about 3 ms). The original AlphaZero-style CNN (`policy_cnn.bin`) is still supported as a fallback.
 * **Self-test:** `engine --selftest` checks the C++ output against PyTorch (also part of `engine --test`).
 
+### Rating estimate (`python/elo_estimate.py`)
+* **What:** after each game, an estimate of the rating your moves resembled, for example "~1550 (1420–1690)". The play panel also shows an overall estimate from your last 10 games and a trend line. Games are stored in SQLite (`data/tutor.db`).
+* **How:** each of your moves gives two pieces of evidence over ratings 600–2800:
+  * how likely a player of each rating was to play it (the rating-aware CNN, via the engine's `humangame` command);
+  * how much it lost by the engine's evaluation, against how often players of each rating lose that much.
+
+  These are combined into a best-fitting rating and an 80% range.
+* **Checked on 5,172 held-out Lichess games** from a month the CNN never saw (September 2026), fitted on half and tested on the other half:
+
+  | | Median error | Mean error | Within ±150 | 80% range holds the true rating |
+  |---|---|---|---|---|
+  | One game | 194 | 255 | 41% | 87% |
+  | 5 games | 99 | 126 | 66% | 79% |
+
+  A single game is a small sample, and single-game estimates lean toward the middle (low ratings read high, high ratings low). Over several games the estimate is within about ±100 typically. The move choice carries most of the signal; the eval losses add a little. Lichess ratings come from timed games, so untimed games against the bot may read somewhat higher.
+
 ### Endgame tablebases (`src/tablebase.hpp`)
 * **What:** Syzygy 3–5 piece tables (WDL + DTZ, ~940 MB), probed through [Fathom](https://github.com/jdart1/Fathom) (MIT, in `include/fathom/`).
 * **In the search:** win/draw/loss probes after captures and pawn moves.
@@ -175,6 +191,8 @@ engine --eval "<fen>" ...                     # static NNUE evaluation
 
 In server mode the commands are:
 * `go <elo> <depth> <ms> <fen> [moves m1 m2 ...]`
+* `humanprobs <elo> <fen> [moves ...]`: each legal move's probability for a player of that rating, most likely first
+* `humangame <elo,elo,...> <w|b|all> <fen> moves m1 m2 ...`: for each move of that side, the played move's probability and rank at each rating
 * `newgame`
 * `quit`
 
@@ -234,6 +252,13 @@ python training/prepare_games.py --games 10000000          # stream rated games 
 python training/train_policy.py --epochs 2                 # writes assets/policy_elo.bin (~30 min)
 ```
 
+**Rating estimate**
+```bash
+python training/fetch_heldout.py                           # held-out rated games -> data/heldout_2026-09.pgn (~20 MB stream)
+python training/heldout_features.py                        # per-move policy (GPU) and eval-loss features (~25 min, 6 processes)
+python training/fit_elo_estimator.py                       # writes assets/elo_model.json and prints the held-out accuracy
+```
+
 **Measuring strength**
 ```bash
 python training/match.py --elo 2400 --games 40             # vs Stockfish's Elo limiter
@@ -250,13 +275,15 @@ python training/match.py --opponent cmake-build-release/engine.exe --opp-cwd old
 ```
 src/            engine: main.cpp (search + protocol), nnue.hpp, policy_net.hpp, tablebase.hpp, tests.hpp
 include/        chess.hpp (move generation, by Disservin), fathom/ (Syzygy probing, MIT)
-python/         api.py (FastAPI bridge), semantic_analysis.py (post-game review)
+python/         api.py (FastAPI bridge), semantic_analysis.py (post-game review),
+                elo_estimate.py + rating_store.py (rating estimate and history)
 web/            index.html, tree.js / tree.css (analysis move tree)
 training/       prepare_data.py, prepare_games.py, label_fens.py, train_nnue.py, train_policy.py,
-                export_policy.py, match.py
+                export_policy.py, match.py, fetch_heldout.py, heldout_features.py, fit_elo_estimator.py
 scripts/        datagen.py (self-play), test_change.py (SPRT), spsa.py, calibrate_elo.py,
                 download_syzygy.py, make_openings.py
-assets/         nnue.bin, policy_elo.bin, policy_cnn.bin (+ test vectors), traced_alphazero.pt, book.bin
+assets/         nnue.bin, policy_elo.bin, policy_cnn.bin (+ test vectors), traced_alphazero.pt, book.bin,
+                elo_model.json
 tests/          API and UCI tests (pytest), openings.epd
 ```
 

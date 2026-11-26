@@ -17,6 +17,7 @@ import threading
 import chess
 import chess.engine
 import chess.polyglot
+import numpy as np
 import os
 import time
 
@@ -93,10 +94,10 @@ class EngineProcess:
             self.proc = None
             raise RuntimeError(f"engine failed to start: {line}")
 
-    def _go_locked(self, fen, elo, depth, time_ms):
+    def _command_locked(self, line):
         if self.proc is None or self.proc.poll() is not None:
             self._start()
-        self.proc.stdin.write(f"go {int(elo)} {int(depth)} {int(time_ms)} {fen}\n")
+        self.proc.stdin.write(line + "\n")
         self.proc.stdin.flush()
         lines = []
         while True:
@@ -108,14 +109,18 @@ class EngineProcess:
                 return "\n".join(lines)
             lines.append(line)
 
-    def go(self, fen, elo, depth, time_ms):
-        """Returns the engine's output block (BEST_MOVE:..., RANK:..., ...)."""
+    def command(self, line):
+        """Sends one server command; returns its output block (the lines before END)."""
         with self.lock:
             try:
-                return self._go_locked(fen, elo, depth, time_ms)
+                return self._command_locked(line)
             except (RuntimeError, OSError):
                 self.close()
-                return self._go_locked(fen, elo, depth, time_ms)  # one retry with a fresh process
+                return self._command_locked(line)  # one retry with a fresh process
+
+    def go(self, fen, elo, depth, time_ms):
+        """Returns the engine's output block (BEST_MOVE:..., RANK:..., ...)."""
+        return self.command(f"go {int(elo)} {int(depth)} {int(time_ms)} {fen}")
 
     def newgame(self):
         """Clears the engine's hash table between games."""
@@ -145,12 +150,15 @@ class EnginePool:
         for e in self.engines:
             self.free.put(e)
 
-    def go(self, fen, elo, depth, time_ms):
+    def command(self, line):
         e = self.free.get()
         try:
-            return e.go(fen, elo, depth, time_ms)
+            return e.command(line)
         finally:
             self.free.put(e)
+
+    def go(self, fen, elo, depth, time_ms):
+        return self.command(f"go {int(elo)} {int(depth)} {int(time_ms)} {fen}")
 
     def newgame(self):
         for e in self.engines:
@@ -627,3 +635,94 @@ def explore_move(request: ExploreRequest):
             }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+# --- Rating estimate ("Evaluate your Elo") ---
+from . import elo_estimate, rating_store
+
+MIN_RATED_MOVES = 10       # fewer of the player's moves say too little about their rating
+COMBINE_GAMES = 10         # the overall estimate uses this many most recent games
+_ELO_MODEL = None
+_ANALYSIS = None           # UCI engine for move losses (same settings as the calibration)
+_ANALYSIS_LOCK = threading.Lock()
+
+
+def _elo_model():
+    global _ELO_MODEL
+    if _ELO_MODEL is None:
+        _ELO_MODEL = elo_estimate.load_model()
+    return _ELO_MODEL
+
+
+def _move_losses(start_fen, moves, plies):
+    """Expected-score loss of the moves at the given 1-based plies."""
+    global _ANALYSIS
+    wanted = set(plies)
+    board = chess.Board(start_fen)
+    losses = {}
+    with _ANALYSIS_LOCK:
+        if _ANALYSIS is None:
+            _ANALYSIS = chess.engine.SimpleEngine.popen_uci(ENGINE_PATH, cwd=PROJECT_ROOT, stderr=subprocess.DEVNULL)
+            atexit.register(_ANALYSIS.quit)
+        for i, u in enumerate(moves):
+            mv = chess.Move.from_uci(u)
+            if i + 1 in wanted:
+                losses[i + 1] = elo_estimate.move_loss(_ANALYSIS, board, mv)[0]
+            board.push(mv)
+    return [losses[p] for p in plies]
+
+
+def _overall():
+    games = rating_store.recent_games(COMBINE_GAMES)
+    history = [{"ts": g["ts"], "rating": g["rating"], "low": g["low"], "high": g["high"],
+                "bot_elo": g["bot_elo"], "result": g["result"]} for g in reversed(games)]
+    if not games:
+        return None, history
+    llp = np.sum([g["llp"] for g in games], axis=0)
+    counts = np.sum([g["counts"] for g in games], axis=0)
+    overall = elo_estimate.estimate_from_summary(llp, counts, _elo_model())
+    overall["games"] = len(games)
+    return overall, history
+
+
+class RateGameRequest(BaseModel):
+    moves: List[str]                  # UCI moves of the whole game
+    start_fen: Optional[str] = None
+    side: str = "w"                   # the human's colour: "w" or "b"
+    bot_elo: Optional[int] = None
+    result: Optional[str] = None      # "1-0", "0-1", "1/2-1/2"
+    save: bool = True
+
+
+@app.post("/rate_game")
+def rate_game(request: RateGameRequest):
+    """Estimates the rating the player's moves in this game resemble, saves it, and returns it
+    with the combined estimate over recent games and the history for a trend line."""
+    if request.side not in ("w", "b"):
+        raise HTTPException(status_code=400, detail="side must be 'w' or 'b'")
+    model = _elo_model()
+    start = request.start_fen or chess.STARTING_FEN
+    cmd = (f"humangame {','.join(map(str, elo_estimate.RATINGS))} {request.side} {start} "
+           f"moves {' '.join(request.moves)}")
+    block = ENGINE.command(cmd)
+    if block.startswith("ERROR"):
+        raise HTTPException(status_code=400, detail=block.split("\n")[0][6:])
+    plies, logp = elo_estimate.parse_humangame(block)
+    keep = [i for i, p in enumerate(plies) if p - 1 >= model["skip_plies"]]
+    if len(keep) < MIN_RATED_MOVES:
+        overall, history = _overall()
+        return {"rated": False, "reason": f"Too short to rate: at least {MIN_RATED_MOVES} of your moves are needed.",
+                "overall": overall, "history": history}
+    plies = [plies[i] for i in keep]
+    losses = _move_losses(start, request.moves, plies)
+    llp, counts = elo_estimate.summary(logp[keep], losses)
+    est = elo_estimate.estimate_from_summary(llp, counts, model)
+    if request.save:
+        rating_store.add_game(request.side, start, request.moves, request.bot_elo, request.result, est, llp, counts)
+    overall, history = _overall()
+    return {"rated": True, "game": est, "overall": overall, "history": history}
+
+
+@app.get("/rating_history")
+def rating_history():
+    overall, history = _overall()
+    return {"overall": overall, "history": history}
