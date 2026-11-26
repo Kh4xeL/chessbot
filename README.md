@@ -103,6 +103,23 @@ Full-strength Stockfish is still far ahead: even with 3 s per move against Stock
 
   A single game is a small sample, and single-game estimates lean toward the middle (low ratings read high, high ratings low). Over several games the estimate is within about ±100 typically. The move choice carries most of the signal; the eval losses add a little. Lichess ratings come from timed games, so untimed games against the bot may read somewhat higher.
 
+### Adaptive opponent (`python/adaptive.py`)
+* **What:** the "Adaptive" box next to the Elo slider. The bot starts at your overall rating estimate (1200 without one) and adjusts so you win about half your games. The play panel shows "Adaptive opponent: playing at ~1600 for you".
+* **Between games:** each finished game, including a resignation, moves it toward a 50% score: ±150 for the first 5 games, ±70 after. In those first games it is also pulled a quarter of the way toward the game's rating estimate.
+* **Within a game:** up to +250 Elo while you are far ahead, and down to −150 while you are far behind, so a lost position eases off a little without becoming a gift.
+* **Range:** 600–2800. The engine's 600 setting picks moves more loosely than the slider's lowest (800), so it can ease off for beginners.
+* **Simulated** with the engine at a fixed setting standing in for the player, 40 games each from a start of 1200 (`scripts/simulate_adaptive.py`):
+
+  | Player | Bot settles at | Player's score after game 10 |
+  |---|---|---|
+  | 800 | ~900 (700–1190) | 50% |
+  | 1000 | ~1050 (840–1190) | 50% |
+  | 1400 | ~1460 | 50% |
+  | 1800 | ~1820 | 52% |
+  | 2200 | ~2210 | 48% |
+
+  Below about 1200 the engine's settings play alike (1-ply search), so the bot wanders further there before the score moves. With an 800 floor the 1000 player scored only 33%, which is why the floor is 600.
+
 ### Endgame tablebases (`src/tablebase.hpp`)
 * **What:** Syzygy 3–5 piece tables (WDL + DTZ, ~940 MB), probed through [Fathom](https://github.com/jdart1/Fathom) (MIT, in `include/fathom/`).
 * **In the search:** win/draw/loss probes after captures and pawn moves.
@@ -276,11 +293,11 @@ python training/match.py --opponent cmake-build-release/engine.exe --opp-cwd old
 src/            engine: main.cpp (search + protocol), nnue.hpp, policy_net.hpp, tablebase.hpp, tests.hpp
 include/        chess.hpp (move generation, by Disservin), fathom/ (Syzygy probing, MIT)
 python/         api.py (FastAPI bridge), semantic_analysis.py (post-game review),
-                elo_estimate.py + rating_store.py (rating estimate and history)
+                elo_estimate.py + rating_store.py (rating estimate and history), adaptive.py
 web/            index.html, tree.js / tree.css (analysis move tree)
 training/       prepare_data.py, prepare_games.py, label_fens.py, train_nnue.py, train_policy.py,
                 export_policy.py, match.py, fetch_heldout.py, heldout_features.py, fit_elo_estimator.py
-scripts/        datagen.py (self-play), test_change.py (SPRT), spsa.py, calibrate_elo.py,
+scripts/        datagen.py (self-play), test_change.py (SPRT), spsa.py, calibrate_elo.py, simulate_adaptive.py,
                 download_syzygy.py, make_openings.py
 assets/         nnue.bin, policy_elo.bin, policy_cnn.bin (+ test vectors), traced_alphazero.pt, book.bin,
                 elo_model.json

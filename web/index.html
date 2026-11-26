@@ -319,6 +319,8 @@
                         oninput="document.getElementById('eloDisplay').innerText = this.value >= 2900 ? 'Max' : this.value">
                     <span id="eloDisplay" style="color: #4CAF50;">2500</span>
                 </label>
+                <label title="The bot starts near your estimated rating and adjusts so you win about half your games">
+                    <input type="checkbox" id="adaptiveMode" onchange="onAdaptiveToggle()"> Adaptive</label>
                 <label>Tutor Assistance:
                     <select id="assistLevel">
                         <option value="0">Level 0: No Help</option>
@@ -356,6 +358,7 @@
             <div class="btn-row" id="playToolbar">
                 <button class="tool-btn" onclick="startNewGame()" title="Start a new game with the chosen colour">♻️ New game</button>
                 <button class="tool-btn" onclick="undoMove()" title="Take back your last move">↶ Undo</button>
+                <button class="tool-btn" onclick="resignGame()" title="Resign this game (it counts as a loss)">🏳️ Resign</button>
                 <button class="tool-btn" onclick="flipBoard()" title="Flip the board">🔄 Flip</button>
                 <button class="tool-btn" onclick="UI.copy(playPgn(), this)">📋 Copy PGN</button>
                 <button class="tool-btn" onclick="UI.download('game.pgn', playPgn())">💾 Download PGN</button>
@@ -384,6 +387,7 @@
 
         <div id="playPanel" class="side-panel" style="display: none;">
             <div class="panel-title">Game</div>
+            <div id="adaptiveInfo" class="rating-note" style="display: none; margin: -4px 0 6px 0; color: #ccc;"></div>
             <div class="stat-row"><span id="capturedByWhite" class="captured"></span><span id="materialBalance" style="font-weight:bold;"></span></div>
             <div class="stat-row"><span id="capturedByBlack" class="captured"></span></div>
             <div class="panel-title" style="margin-top: 10px;">Evaluation</div>
@@ -448,6 +452,9 @@
         var playerColor = 'w';            // the human's colour in play mode
         var playEvals = [];               // per ply: {evalPawns, mate} after that ply (engine's view)
         var gameRated = false;            // this game's rating estimate has been saved
+        var resigned = false;             // the player resigned this game
+        var adaptiveState = null;         // {elo, games} from the server: the adaptive opponent's base Elo
+        var adaptiveGame = false;         // this game is against the adaptive opponent (fixed at its start)
         var lastEngineInfo = '';
         var analysisSummary = null;       // summary block of the last /analyze call
         var engineReq = 0;                // token to drop stale /analyze_position replies
@@ -480,7 +487,7 @@
         }
 
         function onDragStart(source, piece, position, orientation) {
-            if (game.game_over()) return false;
+            if (game.game_over() || (appMode === 'PLAY' && resigned)) return false;
             if (appMode === 'PLAY' && (game.turn() !== playerColor || piece[0] !== playerColor)) return false;
         }
 
@@ -517,6 +524,10 @@
                 statusHTML = 'Game over, drawn position';
                 $('#analyzeBtn').show();
                 if (appMode === 'PLAY' && !gameRated) rateGame(true);
+            }
+            else if (appMode === 'PLAY' && resigned) {
+                statusHTML = 'Game over, you resigned.';
+                $('#analyzeBtn').show();
             }
             else {
                 statusHTML = moveColor + ' to move';
@@ -634,12 +645,12 @@
         $('#assistLevel').on('change', triggerAssistance);
 
         function makeEngineMove() {
-            if (game.game_over() || appMode !== 'PLAY' || game.turn() === playerColor) return;
+            if (game.game_over() || resigned || appMode !== 'PLAY' || game.turn() === playerColor) return;
             $move.hide();
             $thinking.show();
             var fenAtRequest = game.fen();
             var customDepth = parseInt(document.getElementById('depthInput').value) || 30;
-            var currentElo = parseInt(document.getElementById('eloInput').value) || 2500;
+            var currentElo = adaptiveGame ? adaptiveEloNow() : (parseInt(document.getElementById('eloInput').value) || 2500);
             fetch('/get_move', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -664,6 +675,7 @@
                         : `Engine: depth ${data.depth_reached} · ${data.time}s · eval ${UI.fmtEval(data.eval_pawns, data.mate)}`;
                     $('#engineInfo').text(lastEngineInfo);
                     refreshPlayPanel();
+                    if (adaptiveGame) renderAdaptiveInfo();
                     triggerAssistance();
                 })
                 .catch(err => { $thinking.hide(); console.error("API Error:", err); });
@@ -828,7 +840,67 @@
             $('.controls, .status-box, #playToolbar, #playPanel').show();
             $('#analysisToolbar').hide();
             startNewGame();
-            fetch('/rating_history').then(r => r.json()).then(d => renderRating(null, d)).catch(() => {});
+            fetch('/rating_history').then(r => r.json()).then(d => {
+                renderRating(null, d);
+                adaptiveState = d.adaptive;
+                renderAdaptiveInfo();
+            }).catch(() => {});
+        }
+
+        // ---------------------------------------------------------------- adaptive opponent
+        function onAdaptiveToggle() {
+            var on = $('#adaptiveMode').is(':checked');
+            $('#eloInput').prop('disabled', on);
+            $('#eloDisplay').text(on ? 'Adaptive' : ($('#eloInput').val() >= 2900 ? 'Max' : $('#eloInput').val()));
+            // Takes effect from the next game, unless no move has been played yet.
+            if (game.history().length === 0 || (game.history().length === 1 && playerColor === 'b')) adaptiveGame = on;
+            renderAdaptiveInfo();
+        }
+
+        // The player's eval in pawns from the latest engine eval (mates count as +-10).
+        function playerEvalNow() {
+            var last = playEvals.filter(Boolean).slice(-1)[0];
+            if (!last) return null;
+            var e = (last.mate !== null && last.mate !== undefined) ? (last.mate > 0 ? 10 : -10) : last.evalPawns;
+            return playerColor === 'w' ? e : -e;
+        }
+
+        // Mirrors python/adaptive.py in_game_adjust: stronger when the player is far ahead,
+        // a little weaker when far behind.
+        function adaptiveAdjust() {
+            var e = playerEvalNow();
+            if (e === null) return 0;
+            if (e > 1.5) return Math.round(Math.min(250, (e - 1.5) * 100));
+            if (e < -1.5) return -Math.round(Math.min(150, (-e - 1.5) * 60));
+            return 0;
+        }
+
+        function adaptiveEloNow() {
+            var base = (adaptiveState && adaptiveState.elo) || 1200;
+            return Math.max(600, Math.min(2800, base + adaptiveAdjust()));
+        }
+
+        function renderAdaptiveInfo(change) {
+            if (!adaptiveGame && !$('#adaptiveMode').is(':checked')) { $('#adaptiveInfo').hide(); return; }
+            var base = (adaptiveState && adaptiveState.elo) || 1200;
+            var txt = `Adaptive opponent: playing at ~${base} for you`;
+            var adj = adaptiveGame ? adaptiveAdjust() : 0;
+            if (adj > 0) txt += ` (+${adj} while you're ahead)`;
+            if (adj < 0) txt += ` (${adj} while you're behind)`;
+            if (change && change.from !== change.to) txt += `<br>After this game: ${change.from} → ${change.to}`;
+            if (!adaptiveGame) txt += ' <span style="color:#888;">(from the next game)</span>';
+            $('#adaptiveInfo').html(txt).show();
+        }
+
+        function resignGame() {
+            if (appMode !== 'PLAY' || resigned || game.game_over() || game.history().length === 0) return;
+            if (!confirm('Resign this game?')) return;
+            resigned = true;
+            $thinking.hide();
+            $('#arrowLayer').empty();
+            $tutorPanel.hide();
+            updateStatus();
+            if (!gameRated) rateGame(true);
         }
 
         // ---------------------------------------------------------------- rating estimate
@@ -836,28 +908,32 @@
         function rateGame(save) {
             var payload = historyPayload();
             var mine = game.history().filter((_, i) => ((i % 2 === 0) === (payload.start_fen.split(' ')[1] === playerColor))).length;
-            if (mine < 10) {
-                if (!save) {
-                    $('#ratingBox .rating-game').remove();
-                    $('#ratingBox').prepend('<div class="rating-note rating-game">Play at least 10 moves to get an estimate.</div>');
-                }
+            if (mine < 10 && !save) {
+                $('#ratingBox .rating-game').remove();
+                $('#ratingBox').prepend('<div class="rating-note rating-game">Play at least 10 moves to get an estimate.</div>');
                 return;
             }
-            if (save) gameRated = true;
-            var result = game.in_checkmate() ? (game.turn() === 'w' ? '0-1' : '1-0') : (game.in_draw() ? '1/2-1/2' : null);
+            if (save) gameRated = true;   // a short finished game still counts for the adaptive opponent
             $('#rateBtn').prop('disabled', true).text('Rating…');
             fetch('/rate_game', {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(Object.assign(payload, { side: playerColor, save: save, result: result,
-                    bot_elo: parseInt(document.getElementById('eloInput').value) || null }))
+                body: JSON.stringify(Object.assign(payload, { side: playerColor, save: save, result: currentResult(),
+                    adaptive: adaptiveGame,
+                    bot_elo: adaptiveGame ? (adaptiveState && adaptiveState.elo) : (parseInt(document.getElementById('eloInput').value) || null) }))
             })
                 .then(r => r.json())
-                .then(d => renderRating(d.rated ? d.game : null, d, save))
+                .then(d => {
+                    renderRating(d.rated ? d.game : null, d, save);
+                    if (d.adaptive) { adaptiveState = d.adaptive; renderAdaptiveInfo(d.adaptive_change); }
+                })
                 .catch(err => console.error('rate_game failed', err))
                 .finally(() => $('#rateBtn').prop('disabled', false).text('Rate so far'));
         }
 
+        var lastRatingData = null;        // last overall/history from the server, kept across games
+
         function renderRating(gameEst, data, saved) {
+            if (data && data.history) lastRatingData = { overall: data.overall, history: data.history };
             var html = '';
             if (gameEst) {
                 html += `<div class="rating-game"><span class="rating-main">~${gameEst.rating}</span>` +
@@ -905,6 +981,10 @@
             board.start();
             playEvals = [];
             gameRated = false;
+            resigned = false;
+            adaptiveGame = $('#adaptiveMode').is(':checked');
+            renderAdaptiveInfo();
+            renderRating(null, lastRatingData);   // drop the previous game's line, keep the overall
             lastEngineInfo = '';
             $('#engineInfo').text('');
             $('#arrowLayer').empty();
@@ -917,7 +997,7 @@
         }
 
         function undoMove() {
-            if (appMode !== 'PLAY') return;
+            if (appMode !== 'PLAY' || resigned) return;
             // Take back to the last position where it is the player's turn (usually 2 plies).
             var undone = 0;
             do {
@@ -982,8 +1062,16 @@
             UI.renderEvalGraph('#playGraph', pts, pts.length - 1, null, 0);
         }
 
+        // The game's result in PGN form, or null while it is still going.
+        function currentResult() {
+            if (game.in_checkmate()) return game.turn() === 'w' ? '0-1' : '1-0';
+            if (game.in_draw()) return '1/2-1/2';
+            if (resigned) return playerColor === 'w' ? '0-1' : '1-0';
+            return null;
+        }
+
         function playPgn() {
-            var result = game.in_checkmate() ? (game.turn() === 'w' ? '0-1' : '1-0') : (game.in_draw() ? '1/2-1/2' : '*');
+            var result = currentResult() || '*';
             var elo = $('#eloDisplay').text();
             var you = 'You', bot = 'Hybrid NNUE (' + elo + ')';
             var start = historyPayload().start_fen;

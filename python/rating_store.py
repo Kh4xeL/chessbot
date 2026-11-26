@@ -65,3 +65,30 @@ def recent_games(limit=10, path=None):
 def clear(path=None):
     with _lock, _connect(path) as con:
         con.execute("DELETE FROM rated_games")
+
+
+# --- Adaptive opponent state (one row) ---
+ADAPTIVE_SCHEMA = "CREATE TABLE IF NOT EXISTS adaptive_state (id INTEGER PRIMARY KEY CHECK (id = 1), " \
+                  "elo INTEGER NOT NULL, games INTEGER NOT NULL, ts REAL NOT NULL)"
+
+
+def get_adaptive(path=None):
+    """(elo, games) or None if the adaptive opponent hasn't been used yet."""
+    with _lock, _connect(path) as con:
+        con.execute(ADAPTIVE_SCHEMA)
+        row = con.execute("SELECT elo, games FROM adaptive_state WHERE id = 1").fetchone()
+    return tuple(row) if row else None
+
+
+def set_adaptive(elo, games, path=None):
+    with _lock, _connect(path) as con:
+        con.execute(ADAPTIVE_SCHEMA)
+        con.execute("INSERT INTO adaptive_state (id, elo, games, ts) VALUES (1, ?, ?, ?) "
+                    "ON CONFLICT(id) DO UPDATE SET elo = excluded.elo, games = excluded.games, ts = excluded.ts",
+                    (int(elo), int(games), time.time()))
+
+
+def reset_adaptive(path=None):
+    with _lock, _connect(path) as con:
+        con.execute(ADAPTIVE_SCHEMA)
+        con.execute("DELETE FROM adaptive_state")

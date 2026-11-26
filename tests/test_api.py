@@ -170,3 +170,30 @@ def test_rate_game_rejects_short_and_illegal(client, tmp_path, monkeypatch):
     assert not r["rated"] and "at least" in r["reason"]
     bad = client.post("/rate_game", json={"moves": ["e2e4", "e2e4"], "side": "w"})
     assert bad.status_code == 400
+
+
+def test_adaptive_opponent(client, tmp_path, monkeypatch):
+    monkeypatch.setattr(api.rating_store, "DB_PATH", str(tmp_path / "tutor.db"))
+    start = client.get("/rating_history").json()["adaptive"]
+    assert start == {"elo": 1200, "games": 0}            # no history yet: the default
+    # A won game against the adaptive opponent makes it stronger, a lost one weaker.
+    won = post(client, "/rate_game", moves=RATED_GAME, side="w", save=True, adaptive=True, result="1-0")
+    assert won["adaptive_change"]["from"] == 1200 and won["adaptive"]["games"] == 1
+    up = won["adaptive"]["elo"]
+    assert up > 1200
+    lost = post(client, "/rate_game", moves=RATED_GAME[:6], side="w", save=True, adaptive=True, result="0-1")
+    assert not lost["rated"] and lost["adaptive"]["elo"] < up and lost["adaptive"]["games"] == 2
+    # Previews, unfinished games and non-adaptive games leave it alone.
+    for body in ({"save": False, "adaptive": True, "result": "1-0"}, {"adaptive": True}, {"result": "1-0"}):
+        r = post(client, "/rate_game", moves=RATED_GAME, side="w", **body)
+        assert r["adaptive"] == lost["adaptive"]
+    assert client.post("/adaptive/reset").json()["adaptive"]["games"] == 0
+
+
+def test_adaptive_rules():
+    from python import adaptive
+    assert adaptive.initial_elo(None) == 1200 and adaptive.initial_elo(3500) == 2800
+    assert adaptive.update(1500, 0, 1.0) == 1650 and adaptive.update(1500, 10, 0.0) == 1430
+    assert adaptive.update(1500, 10, 0.5) == 1500
+    assert adaptive.in_game_adjust(0.5) == 0 and adaptive.in_game_adjust(9) == 250 and adaptive.in_game_adjust(-9) == -150
+    assert adaptive.score_from_result("0-1", "b") == 1.0 and adaptive.score_from_result("*", "w") is None

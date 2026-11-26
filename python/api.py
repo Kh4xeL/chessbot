@@ -637,7 +637,7 @@ def explore_move(request: ExploreRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 # --- Rating estimate ("Evaluate your Elo") ---
-from . import elo_estimate, rating_store
+from . import adaptive, elo_estimate, rating_store
 
 MIN_RATED_MOVES = 10       # fewer of the player's moves say too little about their rating
 COMBINE_GAMES = 10         # the overall estimate uses this many most recent games
@@ -691,12 +691,23 @@ class RateGameRequest(BaseModel):
     bot_elo: Optional[int] = None
     result: Optional[str] = None      # "1-0", "0-1", "1/2-1/2"
     save: bool = True
+    adaptive: bool = False            # the game was against the adaptive opponent: update its Elo
+
+
+def _adaptive_state():
+    """The adaptive opponent's current base Elo and how many games it has adapted over."""
+    state = rating_store.get_adaptive()
+    if state:
+        return {"elo": state[0], "games": state[1]}
+    overall, _ = _overall()
+    return {"elo": adaptive.initial_elo(overall["rating"] if overall else None), "games": 0}
 
 
 @app.post("/rate_game")
 def rate_game(request: RateGameRequest):
     """Estimates the rating the player's moves in this game resemble, saves it, and returns it
-    with the combined estimate over recent games and the history for a trend line."""
+    with the combined estimate over recent games and the history for a trend line. For a
+    finished game against the adaptive opponent, it also moves the opponent's Elo."""
     if request.side not in ("w", "b"):
         raise HTTPException(status_code=400, detail="side must be 'w' or 'b'")
     model = _elo_model()
@@ -708,21 +719,38 @@ def rate_game(request: RateGameRequest):
         raise HTTPException(status_code=400, detail=block.split("\n")[0][6:])
     plies, logp = elo_estimate.parse_humangame(block)
     keep = [i for i, p in enumerate(plies) if p - 1 >= model["skip_plies"]]
-    if len(keep) < MIN_RATED_MOVES:
-        overall, history = _overall()
-        return {"rated": False, "reason": f"Too short to rate: at least {MIN_RATED_MOVES} of your moves are needed.",
-                "overall": overall, "history": history}
-    plies = [plies[i] for i in keep]
-    losses = _move_losses(start, request.moves, plies)
-    llp, counts = elo_estimate.summary(logp[keep], losses)
-    est = elo_estimate.estimate_from_summary(llp, counts, model)
-    if request.save:
-        rating_store.add_game(request.side, start, request.moves, request.bot_elo, request.result, est, llp, counts)
-    overall, history = _overall()
-    return {"rated": True, "game": est, "overall": overall, "history": history}
+    before = _adaptive_state()        # what the opponent played at, before this game joins the history
+    out = {"rated": len(keep) >= MIN_RATED_MOVES}
+    est = None
+    if out["rated"]:
+        plies = [plies[i] for i in keep]
+        losses = _move_losses(start, request.moves, plies)
+        llp, counts = elo_estimate.summary(logp[keep], losses)
+        est = elo_estimate.estimate_from_summary(llp, counts, model)
+        out["game"] = est
+        if request.save:
+            rating_store.add_game(request.side, start, request.moves, request.bot_elo, request.result, est, llp, counts)
+    else:
+        out["reason"] = f"Too short to rate: at least {MIN_RATED_MOVES} of your moves are needed."
+
+    score = adaptive.score_from_result(request.result, request.side)
+    if request.adaptive and request.save and score is not None:
+        new_elo = adaptive.update(before["elo"], before["games"], score, est["rating"] if est else None)
+        rating_store.set_adaptive(new_elo, before["games"] + 1)
+        out["adaptive_change"] = {"from": before["elo"], "to": new_elo}
+    out["overall"], out["history"] = _overall()
+    out["adaptive"] = _adaptive_state()
+    return out
 
 
 @app.get("/rating_history")
 def rating_history():
     overall, history = _overall()
-    return {"overall": overall, "history": history}
+    return {"overall": overall, "history": history, "adaptive": _adaptive_state()}
+
+
+@app.post("/adaptive/reset")
+def adaptive_reset():
+    """Forget the adaptive opponent's Elo; the next game starts again from the rating estimate."""
+    rating_store.reset_adaptive()
+    return {"adaptive": _adaptive_state()}
