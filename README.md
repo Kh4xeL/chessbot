@@ -120,6 +120,14 @@ Full-strength Stockfish is still far ahead: even with 3 s per move against Stock
 
   Below about 1200 the engine's settings play alike (1-ply search), so the bot wanders further there before the score moves. With an 800 floor the 1000 player scored only 33%, which is why the floor is 600.
 
+### Insights at your level (`python/insights.py`)
+The tutor compares what players at your rating usually play with the engine's choice. Your level is your rating estimate (or the adaptive opponent's Elo, or 1500). Three kinds of insight:
+* **What your level plays**, in the form "Most ~1500 players play Nf3 here (41%). The engine prefers d4, about 0.8 pawns better."
+* **Hard to find:** the engine's move is played by under 10% of players at your level, and it is at least 0.7 pawns better than the popular choice. In the Two Knights line 4.Ng5 d5 5.exd5, only 2% of ~1200 players find 5...b5.
+* **Trap warnings:** a move at least 12% of your level plays that loses 1.2 pawns or more. In Légal's trap (5.Nxe5), 80% of ~1000 players take the queen with 5...Bxd1 and walk into mate.
+
+Each popular move is checked by a short fixed-node search, and with full hints the insights reuse the tutor's own lines, so the two never disagree. With full hints you see all three; with threat warnings only, the trap warnings. Hints also scale with your level: 3-ply lines and only the good moves below 1200, 5 plies up to 1800, full 8-ply lines above.
+
 ### Endgame tablebases (`src/tablebase.hpp`)
 * **What:** Syzygy 3–5 piece tables (WDL + DTZ, ~940 MB), probed through [Fathom](https://github.com/jdart1/Fathom) (MIT, in `include/fathom/`).
 * **In the search:** win/draw/loss probes after captures and pawn moves.
@@ -293,7 +301,7 @@ python training/match.py --opponent cmake-build-release/engine.exe --opp-cwd old
 src/            engine: main.cpp (search + protocol), nnue.hpp, policy_net.hpp, tablebase.hpp, tests.hpp
 include/        chess.hpp (move generation, by Disservin), fathom/ (Syzygy probing, MIT)
 python/         api.py (FastAPI bridge), semantic_analysis.py (post-game review),
-                elo_estimate.py + rating_store.py (rating estimate and history), adaptive.py
+                elo_estimate.py + rating_store.py (rating estimate and history), adaptive.py, insights.py
 web/            index.html, tree.js / tree.css (analysis move tree)
 training/       prepare_data.py, prepare_games.py, label_fens.py, train_nnue.py, train_policy.py,
                 export_policy.py, match.py, fetch_heldout.py, heldout_features.py, fit_elo_estimator.py

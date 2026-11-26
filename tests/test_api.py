@@ -197,3 +197,34 @@ def test_adaptive_rules():
     assert adaptive.update(1500, 10, 0.5) == 1500
     assert adaptive.in_game_adjust(0.5) == 0 and adaptive.in_game_adjust(9) == 250 and adaptive.in_game_adjust(-9) == -150
     assert adaptive.score_from_result("0-1", "b") == 1.0 and adaptive.score_from_result("*", "w") is None
+
+
+# Legal's trap: after 1.e4 e5 2.Nf3 d6 3.Bc4 Bg4 4.Nc3 g6 5.Nxe5, taking the queen (Bxd1) allows mate.
+LEGAL_TRAP = "rn1qkbnr/ppp2p1p/3p2p1/4N3/2B1P1b1/2N5/PPPP1PPP/R1BQK2R b KQkq - 0 5"
+
+
+def test_insights_trap_and_level_choice(client):
+    r = post(client, "/insights", fen=LEGAL_TRAP, level=1000)
+    assert r["level"] == 1000 and r["best"]["move"] == "d6e5"
+    assert r["popular"][0]["move"] == "g4d1" and r["popular"][0]["share"] > 0.3
+    kinds = {i["type"]: i for i in r["insights"]}
+    assert kinds["trap"]["move"] == "g4d1" and "forced loss" in kinds["trap"]["text"]
+    assert "Bxd1" in kinds["level_choice"]["text"] and "dxe5" in kinds["level_choice"]["text"]
+
+
+def test_insights_quiet_start(client):
+    r = post(client, "/insights", fen=START, level=1500)
+    assert [i["type"] for i in r["insights"]] == ["level_choice"]       # no traps, nothing hard to find
+    assert r["popular"][0]["share"] > 0.3
+    assert post(client, "/insights", fen="7k/5Q2/6K1/8/8/8/8/8 b - - 0 1", level=1500)["insights"] == []   # stalemate
+
+
+def test_insights_use_the_tutor_lines(client):
+    # Fried Liver after 4.Ng5 d5 5.exd5: the tutor's own lines (White's view) decide "the engine's move".
+    fen = "r1bqkb1r/ppp2ppp/2n2n2/3Pp1N1/2B5/8/PPPP1PPP/RNBQK2R b KQkq - 0 5"
+    known = [{"move": "c6a5", "eval_pawns": -0.1, "mate": None}, {"move": "f6d5", "eval_pawns": 1.6, "mate": None}]
+    r = post(client, "/insights", fen=fen, level=1200, known=known)
+    assert r["best"]["move"] == "c6a5" and r["best"]["eval"] == 0.1
+    nxd5 = next(p for p in r["popular"] if p["move"] == "f6d5")
+    assert nxd5["eval"] == -1.6 and nxd5["loss"] == 1.7
+    assert any(i["type"] == "trap" and i["move"] == "f6d5" for i in r["insights"])

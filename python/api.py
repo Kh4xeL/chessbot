@@ -637,7 +637,7 @@ def explore_move(request: ExploreRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 # --- Rating estimate ("Evaluate your Elo") ---
-from . import adaptive, elo_estimate, rating_store
+from . import adaptive, elo_estimate, insights, rating_store
 
 MIN_RATED_MOVES = 10       # fewer of the player's moves say too little about their rating
 COMBINE_GAMES = 10         # the overall estimate uses this many most recent games
@@ -655,20 +655,26 @@ def _elo_model():
 
 def _move_losses(start_fen, moves, plies):
     """Expected-score loss of the moves at the given 1-based plies."""
-    global _ANALYSIS
     wanted = set(plies)
     board = chess.Board(start_fen)
     losses = {}
     with _ANALYSIS_LOCK:
-        if _ANALYSIS is None:
-            _ANALYSIS = chess.engine.SimpleEngine.popen_uci(ENGINE_PATH, cwd=PROJECT_ROOT, stderr=subprocess.DEVNULL)
-            atexit.register(_ANALYSIS.quit)
+        eng = _analysis_engine()
         for i, u in enumerate(moves):
             mv = chess.Move.from_uci(u)
             if i + 1 in wanted:
-                losses[i + 1] = elo_estimate.move_loss(_ANALYSIS, board, mv)[0]
+                losses[i + 1] = elo_estimate.move_loss(eng, board, mv)[0]
             board.push(mv)
     return [losses[p] for p in plies]
+
+
+def _analysis_engine():
+    """The UCI engine for fixed-node analysis (move losses, insights); call with _ANALYSIS_LOCK held."""
+    global _ANALYSIS
+    if _ANALYSIS is None:
+        _ANALYSIS = chess.engine.SimpleEngine.popen_uci(ENGINE_PATH, cwd=PROJECT_ROOT, stderr=subprocess.DEVNULL)
+        atexit.register(_ANALYSIS.quit)
+    return _ANALYSIS
 
 
 def _overall():
@@ -754,3 +760,46 @@ def adaptive_reset():
     """Forget the adaptive opponent's Elo; the next game starts again from the rating estimate."""
     rating_store.reset_adaptive()
     return {"adaptive": _adaptive_state()}
+
+
+# --- Tutor insights from the human policy ---
+class InsightsRequest(BaseModel):
+    fen: str
+    level: int = 1500                 # the player's rating (their estimate, or the adaptive opponent's)
+    start_fen: Optional[str] = None
+    moves: List[str] = []
+    known: List[dict] = []            # the tutor's lines: {move, eval_pawns (White's view), mate}, best first
+
+
+@app.post("/insights")
+def get_insights(request: InsightsRequest):
+    """What players at this level play here, compared with the engine: the common choice,
+    hard-to-find best moves and natural-looking moves that lose."""
+    level = max(600, min(2800, int(request.level)))
+    try:
+        if request.start_fen is not None or request.moves:
+            board = chess.Board(request.start_fen or chess.STARTING_FEN)
+            for u in request.moves:
+                board.push_uci(u)
+            if board.fen() != chess.Board(request.fen).fen():
+                board = chess.Board(request.fen)
+        else:
+            board = chess.Board(request.fen)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if board.is_game_over():
+        return {"level": level, "best": None, "popular": [], "insights": []}
+    block = ENGINE.command(f"humanprobs {level} {board.fen()}")   # the policy sees the position only
+    if block.startswith("ERROR"):
+        raise HTTPException(status_code=400, detail=block.split("\n")[0][6:])
+    probs = insights.parse_humanprobs(block)
+    sign = 1 if board.turn == chess.WHITE else -1
+    known = []
+    for k in request.known:
+        mate, ev = k.get("mate"), k.get("eval_pawns")
+        if mate is not None:
+            known.append((k["move"], sign * (insights.EVAL_CAP if mate > 0 else -insights.EVAL_CAP)))
+        elif ev is not None:
+            known.append((k["move"], sign * float(ev)))
+    with _ANALYSIS_LOCK:
+        return insights.compute(board, level, probs, _analysis_engine(), known=known)

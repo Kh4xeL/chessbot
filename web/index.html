@@ -274,6 +274,9 @@
         .rating-range { color: #999; font-size: 12px; margin-left: 6px; }
         .rating-note { color: #888; font-size: 12px; margin-top: 3px; }
         .rating-trend { width: 100%; height: 48px; margin-top: 6px; }
+        .insights { margin-top: 10px; padding-top: 8px; border-top: 1px solid #444; text-align: left; }
+        .insights-title { font-size: 12px; font-weight: bold; color: #4CAF50; text-transform: uppercase; margin-bottom: 4px; }
+        .insight { font-size: 13px; margin: 4px 0; line-height: 1.35; }
     </style>
 </head>
 
@@ -539,6 +542,7 @@
         function getThreatDetection() {
             if (game.game_over() || game.turn() !== playerColor) return;
             var currentElo = parseInt(document.getElementById('eloInput').value) || 2500;
+            var fenAtRequest = game.fen();
             $tutorPanel.removeClass('threat-alert').html('<span style="color:#888;">Scanning for immediate threats...</span>').show();
 
             fetch('/get_threats', {
@@ -574,6 +578,7 @@
                             drawArrow(data.hint.substring(0,2), data.hint.substring(2,4), '#2ecc71', 0.8);
                         }
                     }
+                    appendInsights(['trap'], fenAtRequest);   // medium help: warnings only
                 })
                 .catch(err => console.error("Threat fetch error:", err));
         }
@@ -608,11 +613,13 @@
                     var best = lines.length ? forMe(lines[0]) : null;
                     var colors = ['#2ecc71', '#f1c40f', '#e67e22'];
                     var good = 0, arrows = [];
+                    var plies = hintPlies(), lowLevel = playerLevel() < 1400;
                     lines.forEach((tutor, idx) => {
                         var v = forMe(tutor);
                         var weak = idx > 0 && best !== null && v !== null && best - v > WEAK_LINE_PAWNS;
+                        if (weak && lowLevel) return;   // lower levels: only the moves worth playing
                         var san = UI.uciToSan(game.fen(), (tutor.idea || tutor.move).split(' ').filter(Boolean));
-                        var lineText = san.length ? UI.sanLine(game.fen(), san, 8) : (tutor.idea || 'None');
+                        var lineText = san.length ? UI.sanLine(game.fen(), san, plies) : (tutor.idea || 'None');
                         var badge = showEvals && (tutor.eval_pawns !== null || tutor.mate !== null) ? UI.evalBadge(tutor.eval_pawns, tutor.mate) : '';
                         $tutorPanel.append(`
                             <div class="tutor-line ${weak ? 'muted-line' : ''}" style="margin-bottom: 8px;">
@@ -631,8 +638,43 @@
                     arrows.reverse().forEach(a => drawArrow(a[0].substring(0,2), a[0].substring(2,4), a[1], a[2]));
                     if (lines.length === 1) $tutorPanel.append('<div style="font-size: 12px; color: #aaa;">This is your only legal move.</div>');
                     else if (lines.length > 1 && good === 1) $tutorPanel.append('<div style="font-size: 12px; color: #f1c40f;">⚠️ Only one good move here; the others lose a lot.</div>');
+                    appendInsights(['level_choice', 'hard_to_find', 'trap'], fenAtRequest,
+                        lines.map(t => ({ move: t.move, eval_pawns: t.eval_pawns, mate: t.mate })));
                 })
                 .catch(err => console.error("Tutor fetch error:", err));
+        }
+
+        // ---------------------------------------------------------------- insights by level
+        // The player's level: their overall rating estimate, else the adaptive opponent's Elo, else 1500.
+        function playerLevel() {
+            if (lastRatingData && lastRatingData.overall) return Math.round(lastRatingData.overall.rating / 50) * 50;
+            if (adaptiveState && adaptiveState.games > 0) return adaptiveState.elo;
+            return 1500;
+        }
+
+        // Plies of each hint line to show: short and concrete for lower levels, full lines higher up.
+        function hintPlies() { var l = playerLevel(); return l < 1200 ? 3 : (l < 1800 ? 5 : 8); }
+
+        // Appends what players at the player's level do here (only the given insight types).
+        // known: the tutor's lines already shown, so the insights use the same best move and evals.
+        function appendInsights(types, fenAtRequest, known) {
+            var level = playerLevel();
+            fetch('/insights', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(Object.assign({ fen: game.fen(), level: level, known: known || [] }, historyPayload()))
+            })
+                .then(r => r.json())
+                .then(d => {
+                    if (game.fen() !== fenAtRequest || !d.insights) return;
+                    var items = d.insights.filter(i => types.indexOf(i.type) >= 0);
+                    if (!items.length) return;
+                    var icon = { level_choice: '👥', hard_to_find: '💎', trap: '⚠️' };
+                    var color = { level_choice: '#ccc', hard_to_find: '#7fd1ff', trap: '#ffb38a' };
+                    var html = `<div class="insights"><div class="insights-title">At your level (~${d.level})</div>` +
+                        items.map(i => `<div class="insight" style="color:${color[i.type]};">${icon[i.type]} ${i.text}</div>`).join('') + '</div>';
+                    $tutorPanel.append(html).show();
+                })
+                .catch(err => console.error('insights failed', err));
         }
 
         function triggerAssistance() {
