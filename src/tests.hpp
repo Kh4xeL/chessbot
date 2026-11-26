@@ -155,6 +155,37 @@ inline void tablebase() {
     check(end.empty() && g.inCheck(), "KRvK converted to mate in " + std::to_string(plies) + " plies");
 }
 
+// humanprobs / humangame (needs the rating-aware policy loaded).
+inline void human_policy() {
+    if (policy::NET.version != 2) { std::cout << "SKIP  rating-aware policy not loaded\n"; return; }
+    const std::string start = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+    std::ostringstream a;
+    run_humanprobs(start, {"e2e4", "e7e5"}, 1500, a);
+    double sum = 0;
+    int n = 0;
+    std::string first;
+    std::istringstream in(a.str());
+    for (std::string line; std::getline(in, line);)
+        if (line.rfind("MOVE:", 0) == 0) {
+            if (first.empty()) first = line.substr(5, 4);
+            sum += std::stod(line.substr(line.find("|P:") + 3));
+            n++;
+        }
+    check(n == 29 && std::abs(sum - 1.0) < 1e-3 && first == "g1f3", "humanprobs: 29 moves summing to 1, Nf3 first");
+
+    std::ostringstream g;
+    run_humangame(start, {"e2e4", "e7e5", "g1f3", "b8c6"}, "800,2200", "b", g);
+    const std::string t = g.str();
+    check(t.find("PLY:2|SIDE:b|MOVE:e7e5|LEGAL:20|") != std::string::npos &&
+          t.find("PLY:4|SIDE:b|MOVE:b8c6|") != std::string::npos && t.find("PLY:1|") == std::string::npos,
+          "humangame: one line per black move");
+
+    bool threw = false;
+    try { std::ostringstream x; run_humangame(start, {"e2e4", "e2e4"}, "1500", "all", x); }
+    catch (const std::exception&) { threw = true; }
+    check(threw, "humangame rejects an illegal move");
+}
+
 inline int run(const char* argv0) {
     nnue_incremental();
     see();
@@ -162,6 +193,7 @@ inline int run(const char* argv0) {
     repetition();
     tablebase();
     check(selftest(argv0) == 0, "CNN policy matches PyTorch reference");
+    human_policy();
     std::cout << (fails ? "TESTS FAILED (" + std::to_string(fails) + ")" : std::string("ALL TESTS PASSED")) << "\n";
     return fails ? 1 : 0;
 }

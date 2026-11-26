@@ -14,6 +14,11 @@
  *   engine <fen> [elo] [max_depth] [time_ms]   one search, then exit
  *   engine --server                            read commands from stdin:
  *       go <elo> <max_depth> <time_ms> <fen> [moves m1 m2 ...]   prints the result block, then END
+ *       humanprobs <elo> <fen> [moves ...]     each legal move's probability for a player of that rating:
+ *                                              HUMAN_PROBS:<elo>, then MOVE:e2e4|P:0.41 ... (most likely first), END
+ *       humangame <elo,elo,...> <w|b|all> <fen> moves m1 m2 ...
+ *                                              per move of that side: PLY:n|SIDE:w|MOVE:..|LEGAL:n|P:p1,p2,..|RANK:r1,r2,..
+ *                                              (played move's probability and rank at each rating), then END
  *       newgame                                clears the hash tables
  *       quit
  *   engine --selftest                          checks the CNN against PyTorch output
@@ -973,6 +978,77 @@ std::string pv_string(const std::vector<Move>& pv, size_t max_len = 8) {
     return s;
 }
 
+// ---------------------------------------------------------------------------
+// Human move probabilities (rating-aware policy, no search)
+// ---------------------------------------------------------------------------
+// The board after `moves`; throws on an illegal or unparsable move.
+Board board_after(const std::string& fen, const std::vector<std::string>& moves, std::vector<Move>* played = nullptr) {
+    Board board(fen);
+    for (const auto& u : moves) {
+        const Move m = chess::uci::uciToMove(board, u);
+        Movelist legal;
+        chess::movegen::legalmoves(legal, board);
+        if (m == Move(Move::NO_MOVE) || std::find(legal.begin(), legal.end(), m) == legal.end())
+            throw std::runtime_error("illegal move " + u);
+        if (played) played->push_back(m);
+        board.makeMove(m);
+    }
+    return board;
+}
+
+// humanprobs: every legal move with its probability for a player of `elo`, most likely first.
+void run_humanprobs(const std::string& fen, const std::vector<std::string>& moves, int elo, std::ostream& out) {
+    const Board board = board_after(fen, moves);
+    Movelist legal;
+    chess::movegen::legalmoves(legal, board);
+    const auto pri = root_priors(board, legal, elo);
+    std::vector<int> idx(legal.size());
+    for (int i = 0; i < legal.size(); i++) idx[i] = i;
+    std::sort(idx.begin(), idx.end(), [&](int a, int b) { return pri[a] > pri[b]; });
+    out << "HUMAN_PROBS:" << elo << "\n";
+    for (int i : idx) out << "MOVE:" << chess::uci::moveToUci(legal[i]) << "|P:" << pri[i] << "\n";
+    out << "END" << std::endl;
+}
+
+// humangame: for each move of a game (optionally one side's only), the probability and rank
+// of the move actually played, for players of each rating in `elos` (comma-separated).
+void run_humangame(const std::string& fen, const std::vector<std::string>& moves, const std::string& elos_csv,
+                   const std::string& side, std::ostream& out) {
+    std::vector<int> elos;
+    std::istringstream es(elos_csv);
+    for (std::string e; std::getline(es, e, ',');)
+        if (!e.empty()) elos.push_back(std::stoi(e));
+    if (elos.empty()) throw std::runtime_error("no ratings given");
+    if (side != "w" && side != "b" && side != "all") throw std::runtime_error("side must be w, b or all");
+
+    std::vector<Move> played;
+    board_after(fen, moves, &played);   // validate the whole game first
+    Board board(fen);
+    out << "ELOS:" << elos_csv << "\n";
+    for (size_t ply = 0; ply < played.size(); ply++) {
+        const bool white = board.sideToMove() == chess::Color::WHITE;
+        if (side == "all" || (side == "w") == white) {
+            Movelist legal;
+            chess::movegen::legalmoves(legal, board);
+            const int k = static_cast<int>(std::find(legal.begin(), legal.end(), played[ply]) - legal.begin());
+            std::string ps, rs;
+            for (size_t e = 0; e < elos.size(); e++) {
+                const auto pri = root_priors(board, legal, elos[e]);
+                const int rank = 1 + static_cast<int>(std::count_if(pri.begin(), pri.end(),
+                                                                     [&](float p) { return p > pri[k]; }));
+                std::ostringstream p;
+                p << pri[k];
+                ps += (e ? "," : "") + p.str();
+                rs += (e ? "," : "") + std::to_string(rank);
+            }
+            out << "PLY:" << ply + 1 << "|SIDE:" << (white ? 'w' : 'b') << "|MOVE:" << moves[ply]
+                << "|LEGAL:" << legal.size() << "|P:" << ps << "|RANK:" << rs << "\n";
+        }
+        board.makeMove(played[ply]);
+    }
+    out << "END" << std::endl;
+}
+
 void run_go(const std::string& fen, const std::vector<std::string>& moves, int elo, int max_depth, long long total_ms,
             std::ostream& out) {
     static std::mt19937 rng(static_cast<unsigned>(std::chrono::steady_clock::now().time_since_epoch().count()));
@@ -1252,15 +1328,11 @@ int main(int argc, char* argv_in[]) {
                 std::cout << "OK" << std::endl;
                 continue;
             }
-            if (cmd == "go") {
-                int elo = 3000, depth = 99;
-                long long ms = 3000;
-                ss >> elo >> depth >> ms;
-                // Rest of the line: "<fen> [moves m1 m2 ...]"
+            // Rest of the line: "<fen> [moves m1 m2 ...]"
+            auto read_position = [&ss](std::string& fen, std::vector<std::string>& moves) {
                 std::string rest;
                 std::getline(ss, rest);
-                std::string fen = rest;
-                std::vector<std::string> moves;
+                fen = rest;
                 const auto mpos = rest.find(" moves");
                 if (mpos != std::string::npos) {
                     fen = rest.substr(0, mpos);
@@ -1268,8 +1340,28 @@ int main(int argc, char* argv_in[]) {
                     for (std::string u; ms_in >> u;) moves.push_back(u);
                 }
                 fen.erase(0, fen.find_first_not_of(' '));
+            };
+            if (cmd == "go" || cmd == "humanprobs" || cmd == "humangame") {
+                std::string fen;
+                std::vector<std::string> moves;
                 try {
-                    run_go(fen, moves, elo, depth, ms, std::cout);
+                    if (cmd == "go") {
+                        int elo = 3000, depth = 99;
+                        long long ms = 3000;
+                        ss >> elo >> depth >> ms;
+                        read_position(fen, moves);
+                        run_go(fen, moves, elo, depth, ms, std::cout);
+                    } else if (cmd == "humanprobs") {
+                        int elo = 1500;
+                        ss >> elo;
+                        read_position(fen, moves);
+                        run_humanprobs(fen, moves, elo, std::cout);
+                    } else {
+                        std::string elos, side;
+                        ss >> elos >> side;
+                        read_position(fen, moves);
+                        run_humangame(fen, moves, elos, side, std::cout);
+                    }
                 } catch (const std::exception& e) {
                     std::cout << "ERROR:" << e.what() << "\nEND" << std::endl;
                 }
