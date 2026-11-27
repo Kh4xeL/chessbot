@@ -245,6 +245,7 @@ def test_puzzles_from_mistakes(client, tmp_path, monkeypatch):
     assert client.post("/puzzles/answer", json={"id": p["id"], "move": "e1e2"}).status_code == 400
 
 
+@pytest.mark.skipif(not TABLEBASES, reason="Syzygy tablebases not downloaded")
 def test_endgame_trainer(client):
     pos = post(client, "/endgame/new", ending="KQvK", color="w")
     board = chess.Board(pos["fen"])
