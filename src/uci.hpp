@@ -196,6 +196,7 @@ inline int run() {
                 // the increment; stop new iterations after that, never use more than 3x it.
                 const long long base = left / (movestogo > 0 ? std::min(movestogo, 50) : 30) + inc * 3 / 4;
                 lim.soft_ms = std::max(1LL, base);
+                lim.dynamic = true;
                 hard = std::max(1LL, std::min(base * 3, left / 2) - opt.overhead_ms);
             } else if (lim.nodes || depth < 99) {
                 lim.soft_ms = LLONG_MAX;   // fixed nodes / depth: no clock
