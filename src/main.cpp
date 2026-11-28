@@ -265,11 +265,13 @@ struct RootResult;
 
 // Extra limits for the next search, used by UCI. soft_ms: don't start a new iteration
 // after this (default: 60% of the hard limit); nodes: stop the main thread after this
-// many nodes; infinite: keep searching until stopped.
+// many nodes; infinite: keep searching until stopped; dynamic: soft_ms comes from a game
+// clock, so scale it each iteration by how settled the search is (see iterate()).
 struct Limits {
     long long soft_ms = -1;
     std::uint64_t nodes = 0;
     bool infinite = false;
+    bool dynamic = false;
 };
 Limits g_limits;
 // Called by the main thread after every completed iteration (UCI "info" lines).
@@ -747,8 +749,20 @@ struct RootMove {
     int score = -INF;     // side-to-move point of view
     bool exact = false;
     float prior = 0.0f;   // CNN policy probability
+    std::uint64_t nodes = 0;  // spent on this move in the last iteration (main thread)
     std::vector<Move> pv;
 };
+
+// Time management: how much of the clock-based soft limit to use after an iteration.
+// More when the best move just changed, when the best move took a small share of the
+// nodes (other moves were close), or when the score dropped; less when all is settled.
+double soft_scale(int stable_iters, double best_share, int score_drop) {
+    static const double stability[] = {2.5, 1.2, 0.9, 0.8, 0.75};
+    const double s = stability[std::clamp(stable_iters, 0, 4)];
+    const double share = (1.62 - best_share) * 1.4;
+    const double drop = 1.0 + std::clamp(score_drop, 0, 100) / 200.0;
+    return 0.8 * s * share * drop;   // 0.8: about the same average time as a fixed soft limit
+}
 
 struct RootResult {
     std::vector<RootMove> moves;  // sorted best first
@@ -799,6 +813,9 @@ RootResult iterate(Search& T, Board board, std::vector<RootMove> rms, int max_de
 
     const int K = std::max(1, std::min(multipv, static_cast<int>(rms.size())));
     res.moves = rms;
+    const bool dynamic = T.is_main && g_limits.dynamic && !g_limits.infinite;
+    int stable_iters = 0, prev_score = 0;
+    Move prev_best = Move(Move::NO_MOVE);
 
     for (int depth = first_depth; depth <= max_depth; depth++) {
         std::vector<RootMove> cur = rms;
@@ -813,6 +830,7 @@ RootResult iterate(Search& T, Board board, std::vector<RootMove> rms, int max_de
             T.ss[0].piece = Search::moved_piece(board, rm.move);
             T.ss[0].to = Search::dest(rm.move);
             T.make(board, rm.move);
+            const std::uint64_t nodes_before = T.nodes;
             int s;
             if (alpha == -INF && depth >= 5 && rm.exact && std::abs(rm.score) < MATE_BOUND) {
                 // Aspiration window around last iteration's score; widen on a fail.
@@ -835,6 +853,7 @@ RootResult iterate(Search& T, Board board, std::vector<RootMove> rms, int max_de
             T.unmake(board, rm.move);
             if (T.stop) { done = false; break; }
             completed++;
+            rm.nodes = T.nodes - nodes_before;
 
             rm.score = s;
             rm.exact = alpha == -INF || s > alpha;
@@ -875,7 +894,18 @@ RootResult iterate(Search& T, Board board, std::vector<RootMove> rms, int max_de
         if (g_limits.infinite) continue;
         if (std::abs(cur[0].score) >= MATE_BOUND && depth >= 4) break;     // forced mate found
         // Don't start an iteration that probably can't re-search the best move in time.
-        if (res.ms > soft_ms) break;
+        double scale = 1.0;
+        if (dynamic) {
+            stable_iters = cur[0].move == prev_best ? stable_iters + 1 : 0;
+            std::uint64_t total = 0;
+            for (const auto& rm : cur) total += rm.nodes;
+            const double share = total ? static_cast<double>(cur[0].nodes) / total : 1.0;
+            const bool mate = std::abs(cur[0].score) >= MATE_BOUND || std::abs(prev_score) >= MATE_BOUND;
+            if (depth >= 6) scale = soft_scale(stable_iters, share, mate ? 0 : prev_score - cur[0].score);
+            prev_best = cur[0].move;
+            prev_score = cur[0].score;
+        }
+        if (res.ms > soft_ms * scale) break;
     }
     res.nodes = T.nodes;
     res.ms = T.elapsed_ms();
