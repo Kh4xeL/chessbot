@@ -189,9 +189,12 @@ You need a C and C++17 compiler and CMake, nothing else.
 
 By default the build is optimised for your own CPU (`-march=native`). For a binary you want to share, add `-DENGINE_NATIVE=OFF`: it then runs on any x86-64 CPU with AVX2, at about the same speed.
 
+For about 4-5% more speed, build with profile-guided optimisation instead: `python scripts/build_pgo.py` builds an instrumented engine, runs it on the bench and the self-tests, and rebuilds `cmake-build-release/` from that profile.
+
 ```bash
 cmake-build-release/engine --test                  # all self-checks: NNUE, SEE, mates, repetition, CNN
 cmake-build-release/engine --bench 2000 --threads 4  # search speed on a few positions
+cmake-build-release/engine --bench d16               # fixed depth: same tree every run, for comparing builds
 ```
 
 ### 2. Run the tutor
