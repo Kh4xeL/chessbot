@@ -23,7 +23,8 @@
  *       quit
  *   engine --selftest                          checks the CNN against PyTorch output
  *   engine --test                              all engine self-checks (NNUE, SEE, mates, ...)
- *   engine --bench [ms]                        search speed on a few positions
+ *   engine --bench [ms | dN]                   search speed on a few positions (dN: fixed depth N,
+ *                                              the same tree every run, for comparing builds)
  *   --threads N                                (any mode) Lazy SMP search threads, default 1
  *   --syzygy DIR                               (any mode) Syzygy tablebases; default $SYZYGY_PATH or
  *                                              tools/syzygy, "none" to disable
@@ -1245,7 +1246,7 @@ int selftest(const char* argv0) {
     return fails ? 1 : 0;
 }
 
-int bench(long long ms) {
+int bench(long long ms, int depth = 99) {
     const char* fens[] = {
         "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
         "r1bqkb1r/pppp1ppp/2n2n2/4p2Q/2B1P3/8/PPPP1PPP/RNB1K1NR w KQkq - 4 4",
@@ -1257,7 +1258,7 @@ int bench(long long ms) {
     long long total_ms = 0;
     for (auto fen : fens) {
         tt_clear();
-        RootResult r = search_root(Board(fen), 99, ms, 1, false);
+        RootResult r = search_root(Board(fen), depth, ms, 1, false);
         total_nodes += r.nodes;
         total_ms += r.ms;
         std::cout << "depth " << r.depth << "  best " << chess::uci::moveToUci(r.moves[0].move) << "  score "
@@ -1306,7 +1307,10 @@ int main(int argc, char* argv_in[]) {
         }
         return 0;
     }
-    if (mode == "--bench") return bench(argc >= 3 ? std::stoll(argv[2]) : 2000);
+    if (mode == "--bench") {
+        const std::string a = argc >= 3 ? argv[2] : "2000";
+        return a[0] == 'd' ? bench(24LL * 3600 * 1000, std::stoi(a.substr(1))) : bench(std::stoll(a));
+    }
     if (mode == "--datagen") {   // --datagen <out_dir> [games] [nodes] [seed]
         if (argc < 3) { std::cerr << "usage: engine --datagen <out_dir> [games] [nodes] [seed]\n"; return 1; }
         return datagen::run(argv[2], argc >= 4 ? std::stoll(argv[3]) : 1'000'000,

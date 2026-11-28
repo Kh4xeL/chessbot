@@ -39,6 +39,17 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64")
         target_compile_options(engine PRIVATE -march=x86-64-v3)
     endif()
+    # Profile-guided build (scripts/build_pgo.py): GEN builds an instrumented engine that
+    # writes profiles to ENGINE_PGO_DIR, USE rebuilds with them.
+    set(ENGINE_PGO "" CACHE STRING "Profile-guided optimisation: empty, GEN or USE")
+    set(ENGINE_PGO_DIR "${CMAKE_BINARY_DIR}/pgo" CACHE PATH "Where the PGO profiles go")
+    if(ENGINE_PGO STREQUAL "GEN")
+        target_compile_options(engine PRIVATE -fprofile-generate=${ENGINE_PGO_DIR})
+        target_link_options(engine PRIVATE -fprofile-generate=${ENGINE_PGO_DIR})
+    elseif(ENGINE_PGO STREQUAL "USE")
+        target_compile_options(engine PRIVATE -fprofile-use=${ENGINE_PGO_DIR} -fprofile-correction -Wno-missing-profile)
+        target_link_options(engine PRIVATE -fprofile-use=${ENGINE_PGO_DIR})
+    endif()
     if(MINGW)
         # Bundle the runtime so engine.exe also runs outside CLion: static
         # libgcc/libstdc++, and copy the one remaining DLL (winpthread) next to it.
